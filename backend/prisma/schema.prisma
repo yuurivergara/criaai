@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma-v2"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Job {
+  id        String   @id
+  type      String
+  status    String
+  payload   Json
+  result    Json?
+  error     String?
+  createdAt DateTime
+  updatedAt DateTime
+}
+
+model Page {
+  id              String        @id
+  sourceType      String
+  status          String
+  sourceUrl       String?
+  publicUrl       String?
+  slug            String?       @unique
+  publishedBundle Json?
+  latestVersionId String?
+  createdAt       DateTime
+  updatedAt       DateTime
+}
+
+model PageVersion {
+  id        String   @id
+  pageId    String
+  title     String
+  html      String
+  meta      Json
+  createdAt DateTime
+
+  @@index([pageId])
+}
