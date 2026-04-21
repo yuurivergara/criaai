@@ -1,5 +1,8 @@
 # Documentacao Profissional - Projeto CriaAI
 
+## Prazo do MVP beta (escopo oficial)
+O **MVP beta** do CriaAI tem prazo de **20 dias corridos** a partir do kickoff (data de inicio do projeto), com escopo congelado conforme [04-plano-mvp-20-dias.md](./04-plano-mvp-20-dias.md): geracao por prompt, clonagem por URL com guardrails, edicao basica, publicacao em subdominio com SSL e instrumentacao minima. Itens fora desse prazo (checkout, dominio proprio avancado, MVP publico aberto) ficam em backlog de **fase posterior**, descritos em [06-jira-backlog-mvp.md](./06-jira-backlog-mvp.md).
+
 ## Finalidade
 Este conjunto de documentos define diretrizes de produto, engenharia e operacao para o CriaAI, com foco em:
 - arquitetura de infraestrutura para geracao e clonagem de paginas por IA;
@@ -20,6 +23,7 @@ Os materiais estao orientados para decisao executiva e implementacao tecnica. Ca
 - [03-stack-tecnologica.md](./03-stack-tecnologica.md): linguagens, frameworks e ferramentas por camada.
 - [04-plano-mvp-20-dias.md](./04-plano-mvp-20-dias.md): roteiro de entrega com marcos diarios e criterios de gate.
 - [05-operacao-riscos-slo.md](./05-operacao-riscos-slo.md): SLO/SLA, observabilidade, continuidade e risco operacional.
+- [06-jira-backlog-mvp.md](./06-jira-backlog-mvp.md): cards Jira do MVP em **20 dias** + backlog opcional pos-beta.
 
 ## Convencoes editoriais
 - Linguagem formal, objetiva e orientada a execucao.

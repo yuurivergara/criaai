@@ -1,5 +1,7 @@
 # 04 - Plano de Acao para Lancar MVP Beta em 20 Dias (YURI)
 
+O prazo oficial deste MVP beta e **20 dias corridos** desde o kickoff. Historias para Jira com **prazo estimado em dias desde o inicio** (ex.: 2 dias, 4 dias, ate 20 dias) estao em [06-jira-backlog-mvp.md](./06-jira-backlog-mvp.md) (versao sugerida: `MVP-beta-20d`).
+
 ## 1. Meta de lancamento
 Publicar um MVP beta funcional com:
 - geracao de landing page por prompt;
@@ -111,7 +113,7 @@ flowchart LR
 ## 7. Cadencia de acompanhamento
 - Daily de 15 minutos (progresso, risco, bloqueio).
 - Checkpoint executivo nos dias 7, 12 e 17.
-- Reuniao de decisao Go/No-Go no dia 20.
+- Reuniao de decisao Go/No-Go no ultimo dia do prazo (20 dias apos o inicio).
 
 ## 8. Indicadores de sucesso do beta
 - Tempo para primeira pagina publicada.
