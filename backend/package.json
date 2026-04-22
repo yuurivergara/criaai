@@ -23,7 +23,9 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "load:clone": "node ./scripts/load-test-clone.mjs",
-    "diagnose:clone": "node ./scripts/diagnose-clone-preview.mjs"
+    "diagnose:clone": "node ./scripts/diagnose-clone-preview.mjs",
+    "llm:setup": "node ./scripts/setup-ollama.mjs",
+    "llm:setup:small": "node ./scripts/setup-ollama.mjs --model qwen2.5:3b-instruct"
   },
   "dependencies": {
     "@nestjs/bullmq": "^11.0.4",

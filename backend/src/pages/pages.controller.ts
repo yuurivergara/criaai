@@ -33,6 +33,17 @@ export class PagesController {
     return this.pagesService.createCloneJob(body);
   }
 
+  @ApiOperation({
+    summary: 'Re-explore the quiz walker for an existing cloned page',
+  })
+  @Post(':id/re-explore')
+  async reExplore(
+    @Param('id') id: string,
+    @Body() body: Partial<ClonePageDto>,
+  ) {
+    return this.pagesService.reExploreClone(id, body);
+  }
+
   @ApiOperation({ summary: 'Create publish job' })
   @Post(':id/publish')
   async createPublishJob(

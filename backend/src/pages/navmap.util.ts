@@ -1,10 +1,18 @@
 import { load } from 'cheerio';
+import { CRIAAI_ID_ATTR } from './stable-id.util';
 
 export interface NavigationEdge {
   fromStepId: string;
   selector: string;
   toStepId: string;
   triggerText?: string;
+  /**
+   * Preferred, version-stable identity of the clicked element
+   * (data-criaai-id attribute value). When present, this is used as the
+   * primary lookup during navigation rewriting — CSS selectors remain as
+   * fallback for older edges that were recorded before stable ids existed.
+   */
+  actionId?: string;
 }
 
 export type StepResolver = (toStepId: string) => string;
@@ -33,13 +41,34 @@ export function rewriteNavigation(
   const edges = navigationMap.filter((edge) => edge.fromStepId === stepId);
 
   for (const edge of edges) {
-    const target = $(edge.selector).first();
+    let target = edge.actionId
+      ? $(`[${CRIAAI_ID_ATTR}="${edge.actionId}"]`).first()
+      : $('');
+    if (!target.length && edge.selector) {
+      try {
+        target = $(edge.selector).first();
+      } catch {
+        target = $('');
+      }
+    }
+    if (!target.length && edge.triggerText) {
+      const needle = edge.triggerText.toLowerCase().replace(/\s+/g, ' ').trim();
+      $(
+        'a, button, [role="button"], label, [role="radio"], [role="option"]',
+      ).each((_, raw) => {
+        if (target.length) return;
+        const el = $(raw);
+        const text = el.text().toLowerCase().replace(/\s+/g, ' ').trim();
+        if (text && text === needle) target = el;
+      });
+    }
     if (!target.length) continue;
     const destination = resolver(edge.toStepId);
     if (!destination) continue;
 
-    const tagName = (target.get(0) as { tagName?: string } | undefined)
-      ?.tagName?.toLowerCase();
+    const tagName = (
+      target.get(0) as { tagName?: string } | undefined
+    )?.tagName?.toLowerCase();
 
     target.attr('data-criaai-nav', edge.toStepId);
 

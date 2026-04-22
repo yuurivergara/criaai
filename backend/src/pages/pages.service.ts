@@ -24,11 +24,25 @@ import {
 import {
   applyCustomizationValues,
   detectCustomizationAnchors,
+  expandValuesAcrossGroups,
   type CustomizationAnchor,
   type CustomizationValues,
 } from './customization.util';
 import { UpdatePageContentDto } from './dto/update-page-content.dto';
 import { PageSourceType } from './pages.types';
+import { LlmAssistService } from '../llm/llm-assist.service';
+import { SalesPageGeneratorService } from './sales-page-generator.service';
+import {
+  CRIAAI_ID_ATTR,
+  STABLE_ID_BROWSER_JS,
+  injectStableIdsOnCheerio,
+} from './stable-id.util';
+import {
+  QUIZ_STATE_BROWSER_JS,
+  computeQuizFingerprint,
+  type QuizAction,
+  type QuizStateSnapshot,
+} from './quiz-state.util';
 
 interface CapturedPublicPage {
   url: string;
@@ -46,6 +60,7 @@ interface NavigationEdge {
   selector: string;
   toStepId: string;
   triggerText?: string;
+  actionId?: string;
 }
 
 @Injectable()
@@ -58,6 +73,8 @@ export class PagesService implements OnModuleInit {
     private readonly llmOrchestratorService: LlmOrchestratorService,
     private readonly prismaService: PrismaService,
     private readonly queueService: QueueService,
+    private readonly llmAssistService: LlmAssistService,
+    private readonly salesPageGeneratorService: SalesPageGeneratorService,
   ) {}
 
   onModuleInit() {
@@ -106,6 +123,41 @@ export class PagesService implements OnModuleInit {
     };
   }
 
+  /**
+   * Re-runs the capture + quiz-walker pipeline for an already-created page.
+   * Keeps the page record (and slug/publicUrl) so public links don't break;
+   * only creates a new PageVersion with the fresh walk results.
+   */
+  async reExploreClone(pageId: string, overrides: Partial<ClonePageDto> = {}) {
+    const page = await this.prismaService.page.findUnique({
+      where: { id: pageId },
+    });
+    if (!page) {
+      throw new NotFoundException(`Page ${pageId} not found`);
+    }
+    if (!page.sourceUrl) {
+      throw new BadRequestException('Page has no sourceUrl to re-explore');
+    }
+    const payload: ClonePageDto = {
+      sourceUrl: page.sourceUrl,
+      ...overrides,
+    } as ClonePageDto;
+    const job = await this.jobsService.create('clone', {
+      ...payload,
+      reExploreOfPageId: pageId,
+    });
+    await this.queueService.enqueue('pages.clone', {
+      jobId: job.id,
+      data: payload as unknown as Record<string, unknown>,
+      reExploreOfPageId: pageId,
+    });
+    return {
+      jobId: job.id,
+      status: job.status,
+      pageId,
+    };
+  }
+
   async createPublishJob(pageId: string, payload: PublishPageDto) {
     await this.getPageById(pageId);
     const job = await this.jobsService.create('publish', {
@@ -144,27 +196,145 @@ export class PagesService implements OnModuleInit {
   private async processGenerateJob(jobId: string, payload: GeneratePageDto) {
     await this.jobsService.updateStatus(jobId, 'processing');
     try {
-      const result = await this.llmOrchestratorService.generate({
-        instruction: 'Generate a high-performance landing page',
-        context: {
-          prompt: payload.prompt,
-          title: payload.title,
-          cta: payload.cta,
-        },
+      this.logger.log(
+        `[generate:${jobId}] starting product="${payload.productName ?? ''}" tone=${payload.tone ?? 'confident'} language=${payload.language ?? 'pt-BR'} niche="${payload.niche ?? ''}" hasVsl=${Boolean(payload.vslUrl)} hasCheckout=${Boolean(payload.checkoutUrl)}`,
+      );
+
+      const result = await this.salesPageGeneratorService.generate({
+        prompt: payload.prompt,
+        productName: payload.productName,
+        title: payload.title,
+        cta: payload.cta,
+        audience: payload.audience,
+        niche: payload.niche,
+        promise: payload.promise,
+        uniqueMechanism: payload.uniqueMechanism,
+        objections: payload.objections,
+        proofPoints: payload.proofPoints,
+        bonuses: payload.bonuses,
+        authorName: payload.authorName,
+        authorRole: payload.authorRole,
+        authorBio: payload.authorBio,
+        urgencyHook: payload.urgencyHook,
+        priceOffer: payload.priceOffer,
+        guarantee: payload.guarantee,
+        tone: payload.tone,
+        language: payload.language,
+        layoutPreference: payload.layoutPreference,
+        palettePreference: payload.palettePreference,
+        typographyPreference: payload.typographyPreference,
+        vslUrl: payload.vslUrl,
+        checkoutUrl: payload.checkoutUrl,
+        workspaceId: payload.workspaceId,
       });
+
+      // Reuse the clone pipeline: inject stable ids + normalize + detect
+      // customization anchors. We feed a synthetic base href so the cloned
+      // editor works the same way it does for real captures.
+      const syntheticSource = 'https://generated.criaai.local/sales/';
+      const preparedHtml = this.prepareCloneHtml(result.html, syntheticSource);
+
+      const mainPage: CapturedPublicPage = {
+        url: syntheticSource,
+        title: result.title,
+        html: preparedHtml,
+        renderMode: 'runtime',
+        stepId: 'main',
+      };
+
+      const publicPages: CapturedPublicPage[] = [mainPage];
+      const customizationAnchors = this.buildCustomizationAnchors(
+        publicPages,
+        [],
+      );
+
+      // Pre-seed customization values the user already supplied, so the first
+      // render already shows their VSL / checkout.
+      const customizationValues: CustomizationValues = {};
+      if (payload.vslUrl) {
+        const vslAnchor = customizationAnchors.find((a) => a.kind === 'video');
+        if (vslAnchor) customizationValues[vslAnchor.id] = payload.vslUrl;
+      }
+      if (payload.checkoutUrl) {
+        for (const anchor of customizationAnchors) {
+          if (anchor.kind === 'checkout') {
+            customizationValues[anchor.id] = payload.checkoutUrl;
+          }
+        }
+      }
+
+      this.logger.log(
+        `[generate:${jobId}] built page htmlLength=${preparedHtml.length} anchors=${customizationAnchors.length} (ck=${customizationAnchors.filter((a) => a.kind === 'checkout').length}, vsl=${customizationAnchors.filter((a) => a.kind === 'video').length})`,
+      );
+
       const page = await this.persistPage(
         'generate',
         result.title,
-        result.html,
-        result.meta,
+        preparedHtml,
+        {
+          objective: payload.prompt,
+          cta: payload.cta ?? result.copy.primaryCta,
+          productName: result.copy.productName,
+          audience: payload.audience,
+          niche: payload.niche,
+          priceOffer: payload.priceOffer,
+          tone: result.meta.tone,
+          language: result.meta.language,
+          generatorProvider: result.meta.provider,
+          generatorModel: result.meta.model,
+          design: {
+            layout: result.meta.layout,
+            palette: result.meta.palette,
+            typography: result.meta.typography,
+            seed: result.design.seed,
+          },
+          copy: result.copy,
+          publicPages,
+          navigationMap: [],
+          customizationAnchors,
+          customizationValues,
+        },
       );
+
+      // Auto-publish so the customer already gets a public URL shipped with
+      // the job result. The slug is derived from productName (+niche) with a
+      // random suffix fallback to escape uniqueness collisions.
+      let published: { slug: string; publicUrl: string } | null = null;
+      try {
+        const baseSlug = this.slugify(
+          [result.copy.productName, payload.niche].filter(Boolean).join(' ') ||
+            result.title ||
+            'sales',
+        );
+        published = await this.publishPageToSlug(page.id, baseSlug);
+        this.logger.log(
+          `[generate:${jobId}] auto-published slug=${published.slug} url=${published.publicUrl}`,
+        );
+      } catch (err) {
+        // Don't fail the whole job if publishing fails — the user can still
+        // edit and publish manually from the editor.
+        this.logger.warn(
+          `[generate:${jobId}] auto-publish failed: ${
+            err instanceof Error ? err.message : 'unknown'
+          }`,
+        );
+      }
+
       await this.jobsService.updateStatus(jobId, 'completed', {
         result: {
           pageId: page.id,
           versionId: page.latestVersionId,
+          provider: result.meta.provider,
+          publicUrl: published?.publicUrl,
+          slug: published?.slug,
         },
       });
     } catch (error) {
+      this.logger.error(
+        `[generate:${jobId}] failed: ${
+          error instanceof Error ? error.message : 'unknown'
+        }`,
+      );
       await this.jobsService.updateStatus(jobId, 'failed', {
         error:
           error instanceof Error
@@ -272,10 +442,17 @@ export class PagesService implements OnModuleInit {
       const customizationAnchors = Array.isArray(meta.customizationAnchors)
         ? (meta.customizationAnchors as CustomizationAnchor[])
         : [];
-      const customizationValues =
+      const rawCustomizationValues =
         meta.customizationValues && typeof meta.customizationValues === 'object'
           ? (meta.customizationValues as CustomizationValues)
           : {};
+      // Expand per-step values across groupId so the user editing the
+      // checkout URL on q05 propagates to q12, q18, and every other step
+      // where the SAME button appears.
+      const customizationValues = expandValuesAcrossGroups(
+        customizationAnchors,
+        rawCustomizationValues,
+      );
 
       const steps = publicPages.length
         ? publicPages
@@ -351,6 +528,162 @@ export class PagesService implements OnModuleInit {
           error instanceof Error ? error.message : 'Unexpected publish error',
       });
     }
+  }
+
+  /**
+   * Slugify arbitrary text into a URL-safe fragment: lowercase, latin-only,
+   * dashes between words, no consecutive dashes, bounded length.
+   */
+  private slugify(raw: string, maxLength = 40): string {
+    const normalized = (raw || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    const trimmed = normalized.slice(0, maxLength).replace(/-+$/, '');
+    return trimmed || 'sales';
+  }
+
+  /**
+   * Publish a page inline (no queue). Used by the generate flow to auto-
+   * publish the freshly-created page to a unique public slug so the customer
+   * immediately has a shareable URL.
+   *
+   * Retries on slug collisions up to `maxAttempts` times by swapping the
+   * random suffix — after that it bubbles the last error up.
+   */
+  private async publishPageToSlug(
+    pageId: string,
+    baseSlug: string,
+    maxAttempts = 5,
+  ): Promise<{ slug: string; publicUrl: string }> {
+    const page = await this.prismaService.page.findUnique({
+      where: { id: pageId },
+    });
+    if (!page) throw new NotFoundException(`Page ${pageId} not found`);
+    if (!page.latestVersionId) {
+      throw new BadRequestException('Page has no version to publish');
+    }
+    const version = await this.prismaService.pageVersion.findUnique({
+      where: { id: page.latestVersionId },
+    });
+    if (!version) throw new NotFoundException('Version not found');
+
+    const meta =
+      version.meta && typeof version.meta === 'object'
+        ? (version.meta as Record<string, unknown>)
+        : {};
+    const publicPages = Array.isArray(meta.publicPages)
+      ? (meta.publicPages as CapturedPublicPage[])
+      : [];
+    const navigationMap = Array.isArray(meta.navigationMap)
+      ? (meta.navigationMap as NavigationEdge[])
+      : [];
+    const customizationAnchors = Array.isArray(meta.customizationAnchors)
+      ? (meta.customizationAnchors as CustomizationAnchor[])
+      : [];
+    const rawCustomizationValues =
+      meta.customizationValues && typeof meta.customizationValues === 'object'
+        ? (meta.customizationValues as CustomizationValues)
+        : {};
+    const customizationValues = expandValuesAcrossGroups(
+      customizationAnchors,
+      rawCustomizationValues,
+    );
+
+    const steps = publicPages.length
+      ? publicPages
+      : [
+          {
+            url: page.sourceUrl ?? 'about:blank',
+            title: version.title,
+            html: version.html,
+            stepId: 'main',
+          } as CapturedPublicPage,
+        ];
+
+    const publicBase =
+      process.env.PUBLIC_BASE_URL ??
+      `http://localhost:${process.env.PORT ?? 3000}/v1/public`;
+
+    const sanitizedBase = this.slugify(baseSlug).slice(0, 40) || 'sales';
+
+    const buildBundle = (slug: string) => {
+      const publishedSteps = steps.map((step) => {
+        const stepId = step.stepId ?? 'main';
+        const resolver: StepResolver = (toStepId) => {
+          const normalized =
+            toStepId === 'main' ? '' : `/${encodeURIComponent(toStepId)}`;
+          return `${publicBase}/${slug}${normalized}`;
+        };
+        const stepAnchors = customizationAnchors.filter(
+          (a) => a.stepId === stepId,
+        );
+        const customized = applyCustomizationValues(
+          step.html,
+          stepAnchors,
+          customizationValues,
+        );
+        const rewritten = rewriteNavigation(
+          customized,
+          stepId,
+          navigationMap,
+          resolver,
+          { neutralizeExternal: true },
+        );
+        return {
+          stepId,
+          title: step.title,
+          html: rewritten,
+          renderMode: step.renderMode ?? 'runtime',
+        };
+      });
+      return {
+        mainStepId: 'main',
+        steps: publishedSteps,
+        publishedAt: new Date().toISOString(),
+      };
+    };
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      // First attempt uses base slug alone; next attempts add a random suffix
+      // to escape uniqueness collisions on Page.slug.
+      const suffix =
+        attempt === 0
+          ? ''
+          : `-${Math.random().toString(36).slice(2, 7).toLowerCase()}`;
+      const slug = `${sanitizedBase}${suffix}`.slice(0, 50);
+      const publicUrl = `${publicBase}/${slug}`;
+      try {
+        const bundle = buildBundle(slug);
+        await this.prismaService.page.update({
+          where: { id: pageId },
+          data: {
+            status: 'published',
+            publicUrl,
+            slug,
+            publishedBundle: bundle as unknown as Prisma.InputJsonValue,
+            updatedAt: new Date(),
+          },
+        });
+        return { slug, publicUrl };
+      } catch (err) {
+        lastError = err;
+        // Prisma throws P2002 on unique constraint violation; retry on anything
+        // looking like a uniqueness collision, otherwise bail out immediately.
+        const msg = err instanceof Error ? err.message : String(err);
+        const looksLikeUniqueCollision =
+          /Unique constraint|P2002|duplicate key|unique/i.test(msg);
+        if (!looksLikeUniqueCollision) break;
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Unable to allocate a unique public slug');
   }
 
   private persistPage(
@@ -950,10 +1283,10 @@ export class PagesService implements OnModuleInit {
     variants: CapturedPublicPage[];
     navigationMap: NavigationEdge[];
   }> {
-    const MAX_STEPS_PER_WALK = 120;
-    const MAX_TOTAL_STATES = 400;
-    const MAX_FORKS_TO_EXPLORE = 80;
-    const MAX_TIME_MS = 18 * 60 * 1000;
+    const MAX_STEPS_PER_WALK = 180;
+    const MAX_TOTAL_STATES = 600;
+    const MAX_FORKS_TO_EXPLORE = 140;
+    const MAX_TIME_MS = 22 * 60 * 1000;
 
     const baseHost = (() => {
       try {
@@ -966,12 +1299,7 @@ export class PagesService implements OnModuleInit {
     const startedAt = Date.now();
     const deadlineAt = startedAt + MAX_TIME_MS;
 
-    type Action = {
-      selector: string;
-      triggerText: string;
-      kind: 'advance' | 'option' | 'link';
-      score: number;
-    };
+    type Action = QuizAction;
     type ForkPoint = {
       atSignature: string;
       sourceStepId: string;
@@ -1019,9 +1347,10 @@ export class PagesService implements OnModuleInit {
       const page = await context.newPage();
       let prevStepId: string | null = null;
       let prevAction: Action | null = null;
-      let consecutiveDuplicates = 0;
       const seenInThisWalk = new Set<string>();
+      const clickedActionsThisWalk = new Set<string>();
       let overrideConsumed = !override;
+      let consecutiveFakeLoaders = 0;
 
       try {
         await page.goto(sourceUrl, {
@@ -1047,11 +1376,6 @@ export class PagesService implements OnModuleInit {
             break;
           }
 
-          await this.scrollPageForLazyContent(page, { resetToTop: false });
-          await this.materializeDynamicAssets(page);
-          await this.waitForLazyHydration(page, jobId);
-          await page.waitForTimeout(300);
-
           const currentUrl = page.url();
           if (baseHost) {
             try {
@@ -1066,12 +1390,85 @@ export class PagesService implements OnModuleInit {
             }
           }
 
-          const mhtmlState = await this.captureMhtmlSelfContained(page, jobId);
+          // Inject stable ids into the live DOM BEFORE extracting anything.
+          // This keeps ids identical across capture + signature + cheerio +
+          // editor. We do this every step because React/Vue mount new
+          // elements on transition; already-tagged nodes are preserved.
+          await page
+            .evaluate((script: string) => {
+              try {
+                // eslint-disable-next-line no-eval
+                eval(script);
+              } catch {
+                /* swallow */
+              }
+            }, STABLE_ID_BROWSER_JS)
+            .catch(() => undefined);
+
+          // Fast quiz-aware readiness probe. Replaces the generic
+          // waitForLazyHydration (6-8s per step) with a 400-1400ms poll that
+          // checks the three things that actually matter: 1+ interactive
+          // element visible, body has text, no loader present. Also returns
+          // the SAME payload we need for fingerprint + action enumeration,
+          // so one page.evaluate replaces three.
+          const snapshot = await this.waitForQuizStepReady(page);
+          if (!snapshot) {
+            this.logger.log(
+              `[clone:${jobId ?? 'n/a'}] ${walkLabel} readiness probe returned null at step=${step}, stopping`,
+            );
+            break;
+          }
+
+          // Fake-loader screens (spinner/skeleton only, zero interactives)
+          // are NOT real quiz steps — they're transient frames between real
+          // steps. Record nothing, wait a bit longer, and re-probe.
+          if (
+            snapshot.stepType === 'fake_loader' &&
+            snapshot.readiness.interactiveCount === 0
+          ) {
+            consecutiveFakeLoaders += 1;
+            if (consecutiveFakeLoaders >= 6) {
+              this.logger.log(
+                `[clone:${jobId ?? 'n/a'}] ${walkLabel} loader never resolved after ${consecutiveFakeLoaders} polls, stopping`,
+              );
+              break;
+            }
+            this.logger.debug(
+              `[clone:${jobId ?? 'n/a'}] ${walkLabel} fake loader at step ${step} (#${consecutiveFakeLoaders}), waiting`,
+            );
+            await page.waitForTimeout(1500);
+            continue;
+          }
+          consecutiveFakeLoaders = 0;
+
+          // Multi-signal fingerprint: path + step type + question-text hash +
+          // option-labels hash + counts of each interactive kind. Resilient
+          // to React re-renders, progress bar injections, and "selected"
+          // class toggles — AND distinct between questions that share the
+          // same Continue button (the #1 bug that made no.diet cap at 18).
+          const fp = computeQuizFingerprint(snapshot, currentUrl);
+          const signature = fp.signature;
+
+          const isFirstSeenInWalk = !seenInThisWalk.has(signature);
+          const isFirstSeenGlobal = !allStates.has(signature);
+          seenInThisWalk.add(signature);
+
+          // Heavy MHTML capture is done ONLY for newly discovered states —
+          // this makes fork exploration dramatically faster (and avoids the
+          // "mid-transition MHTML returns stale markup" class of bugs).
           let stateHtml: string;
-          if (mhtmlState) {
-            stateHtml = mhtmlState;
+          if (isFirstSeenGlobal) {
+            const mhtmlState = await this.captureMhtmlSelfContained(
+              page,
+              jobId,
+            );
+            if (mhtmlState) {
+              stateHtml = mhtmlState;
+            } else {
+              await this.inlineExternalStylesheets(page);
+              stateHtml = await page.content();
+            }
           } else {
-            await this.inlineExternalStylesheets(page);
             stateHtml = await page.content();
           }
 
@@ -1084,34 +1481,6 @@ export class PagesService implements OnModuleInit {
               `[clone:${jobId ?? 'n/a'}] ${walkLabel} skipping boilerplate "${stateTitle}"`,
             );
             break;
-          }
-
-          const sig$ = load(stateHtml);
-          sig$('script, style, noscript, link, meta').remove();
-          const visibleText = sig$('body')
-            .text()
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 2500);
-          const signature = `${stateTitle}|${currentUrl.replace(/[?#].*$/, '')}|${visibleText}`;
-
-          const isFirstSeenInWalk = !seenInThisWalk.has(signature);
-          const isFirstSeenGlobal = !allStates.has(signature);
-          seenInThisWalk.add(signature);
-
-          if (!isFirstSeenInWalk) {
-            consecutiveDuplicates += 1;
-            this.logger.log(
-              `[clone:${jobId ?? 'n/a'}] ${walkLabel} step ${step}: revisit (consec dup=${consecutiveDuplicates})`,
-            );
-            if (consecutiveDuplicates >= 3) {
-              this.logger.log(
-                `[clone:${jobId ?? 'n/a'}] ${walkLabel} stuck on duplicate state, stopping`,
-              );
-              break;
-            }
-          } else {
-            consecutiveDuplicates = 0;
           }
 
           let currentStepId: string;
@@ -1148,242 +1517,64 @@ export class PagesService implements OnModuleInit {
           // screen needs its own edge so the editor can show every
           // navigation chip. We only dedupe by exact (from, selector, to).
           if (prevAction && prevStepId && prevStepId !== currentStepId) {
-            const dupKey = `${prevStepId}|${prevAction.selector}|${currentStepId}`;
+            const actionKey = prevAction.actionId ?? prevAction.selector;
+            const dupKey = `${prevStepId}|${actionKey}|${currentStepId}`;
             const exists = navigationMap.some(
-              (e) => `${e.fromStepId}|${e.selector}|${e.toStepId}` === dupKey,
+              (e) =>
+                `${e.fromStepId}|${e.actionId ?? e.selector}|${e.toStepId}` ===
+                dupKey,
             );
             if (!exists) {
               navigationMap.push({
                 fromStepId: prevStepId,
                 toStepId: currentStepId,
-                selector: prevAction.selector,
+                selector: prevAction.actionId
+                  ? `[${CRIAAI_ID_ATTR}="${prevAction.actionId}"]`
+                  : prevAction.selector,
+                actionId: prevAction.actionId,
                 triggerText: prevAction.triggerText,
               });
             }
           }
 
-          // Enumerate viable actions on the current state.
-          const actions = (await page.evaluate((_arg: unknown) => {
-            const ADVANCE_TEXTS = [
-              'continuar',
-              'continue',
-              'next',
-              'proximo',
-              'próximo',
-              'siguiente',
-              'avanzar',
-              'submit',
-              'enviar',
-              'comenzar',
-              'empezar',
-              'começar',
-              'comecar',
-              'start',
-              'finalizar',
-              'concluir',
-              'finish',
-              'get plan',
-              'get my plan',
-              'get my',
-              'meu plano',
-              'meu resultado',
-              'ver resultado',
-              'ver plano',
-              'ok',
-              'aceptar',
-              'aceitar',
-              'i agree',
-              'concordo',
-            ];
-            const SKIP_TEXTS = [
-              'login',
-              'sign in',
-              'signin',
-              'entrar',
-              'voltar',
-              'back',
-              'previous',
-              'anterior',
-              'volver',
-              'cancelar',
-              'cancel',
-              'fechar',
-              'close',
-              'pular',
-              'skip',
-              'no thanks',
-              'menu',
-            ];
-            const BOILERPLATE_RE =
-              /(privacy|privacidade|politica|policy|policies|terms|termos|tos|cookie|cookies|gdpr|lgpd|imprint|impressum|disclaimer|refund|reembolso|cancelamento|cancellation|sitemap|about[- ]us|sobre[- ]nos|contact|contato|fale[- ]conosco|faq|help|ajuda|support|suporte)/;
-            const normalize = (value: string) =>
-              value
-                .toLowerCase()
-                .normalize('NFD')
-                .replace(/[\u0300-\u036f]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            const buildCssPath = (start: Element): string => {
-              const segments: string[] = [];
-              let node: Element | null = start;
-              while (node && node.nodeType === 1 && node !== document.body) {
-                const tag = node.tagName.toLowerCase();
-                const parent = node.parentElement;
-                if (!parent) {
-                  segments.unshift(tag);
-                  break;
-                }
-                const targetTag = node.tagName;
-                const sameTagSiblings = Array.from(parent.children).filter(
-                  (c: Element) => c.tagName === targetTag,
-                );
-                let segment = tag;
-                if (sameTagSiblings.length > 1) {
-                  const index = sameTagSiblings.indexOf(node) + 1;
-                  segment = `${tag}:nth-of-type(${index})`;
-                }
-                segments.unshift(segment);
-                node = parent;
-              }
-              return segments.join(' > ');
-            };
-            const isVisible = (el: HTMLElement): boolean => {
-              const rect = el.getBoundingClientRect();
-              if (
-                rect.width <= 4 ||
-                rect.height <= 4 ||
-                rect.bottom <= 0 ||
-                rect.right <= 0
-              ) {
-                return false;
-              }
-              const cs = getComputedStyle(el);
-              if (
-                cs.display === 'none' ||
-                cs.visibility === 'hidden' ||
-                parseFloat(cs.opacity || '1') < 0.05
-              ) {
-                return false;
-              }
-              return true;
-            };
-            const all = Array.from(
-              document.querySelectorAll<HTMLElement>(
-                'button, [role="button"], a, [role="radio"], [role="option"], [role="tab"], [role="checkbox"], [role="switch"], input[type="submit"], input[type="button"], input[type="radio"], input[type="checkbox"], label, [data-testid], [data-cy]',
-              ),
+          // Terminal state: checkout CTA detected. Stop exploring — we do NOT
+          // want to actually navigate off-site. The customization pass will
+          // pick the checkout button up later and let the user wire their own
+          // URL in the editor.
+          if (snapshot.stepType === 'checkout_end') {
+            this.logger.log(
+              `[clone:${jobId ?? 'n/a'}] ${walkLabel} reached checkout-end at ${currentStepId} "${fp.humanTitle.slice(0, 60)}", stopping exploration`,
             );
-            const seen = new Set<string>();
-            const out: Array<{
-              selector: string;
-              triggerText: string;
-              kind: 'advance' | 'option' | 'link';
-              score: number;
-            }> = [];
-            for (const el of all) {
-              if (!isVisible(el)) continue;
-              const role = (el.getAttribute('role') ?? '').toLowerCase();
-              const rawText =
-                el instanceof HTMLInputElement
-                  ? el.value || el.getAttribute('aria-label') || ''
-                  : el.textContent || el.getAttribute('aria-label') || '';
-              const text = normalize(rawText);
-              const href = (el.getAttribute('href') ?? '').toLowerCase();
+            break;
+          }
 
-              // Skip pure hidden checkboxes (no surrounding label — would not
-              // be clicked by a human). We still keep <label> wrappers and
-              // role=checkbox cards because most modern quizzes use those.
-              if (
-                el instanceof HTMLInputElement &&
-                (el.type || '').toLowerCase() === 'checkbox'
-              ) {
-                continue;
-              }
-              if (!text || text.length < 1 || text.length > 200) continue;
-              if (
-                SKIP_TEXTS.some((s) => text === s || text.startsWith(s + ' '))
-              )
-                continue;
-              if (BOILERPLATE_RE.test(text) || BOILERPLATE_RE.test(href)) {
-                continue;
-              }
-              if (href.startsWith('http') && !href.includes(location.host)) {
-                continue;
-              }
-              // Skip nested labels that wrap another already-tracked label
-              if (
-                el.tagName === 'LABEL' &&
-                el.querySelector('label, button, [role="button"], a')
-              ) {
-                continue;
-              }
-              const selector = buildCssPath(el);
-              if (!selector || seen.has(selector)) continue;
-              seen.add(selector);
-
-              let kind: 'advance' | 'option' | 'link' = 'option';
-              let score = 0;
-              const isAdvanceText = ADVANCE_TEXTS.some(
-                (s) => text === s || text.includes(s),
-              );
-              const isSubmit =
-                el instanceof HTMLButtonElement && el.type === 'submit';
-              const isAnchorBtn = el.tagName === 'BUTTON' || role === 'button';
-              const isRadioLike =
-                (el instanceof HTMLInputElement && el.type === 'radio') ||
-                role === 'radio' ||
-                role === 'option' ||
-                role === 'tab' ||
-                (el.tagName === 'LABEL' &&
-                  !!el.querySelector('input[type="radio"]'));
-              const isCheckboxLike =
-                role === 'checkbox' ||
-                role === 'switch' ||
-                (el.tagName === 'LABEL' &&
-                  !!el.querySelector('input[type="checkbox"]'));
-
-              if (isAdvanceText) {
-                kind = 'advance';
-                score = 1000 - text.length;
-              } else if (isSubmit) {
-                kind = 'advance';
-                score = 800;
-              } else if (isRadioLike) {
-                kind = 'option';
-                score = 300;
-              } else if (isCheckboxLike) {
-                kind = 'option';
-                score = 250;
-              } else if (
-                isAnchorBtn &&
-                rawText.length > 0 &&
-                rawText.length < 60 &&
-                !el.closest('header, nav, footer')
-              ) {
-                kind = 'advance';
-                score = 500;
-              } else if (el.tagName === 'A' && href) {
-                kind = 'link';
-                score = 100;
-              } else {
-                kind = 'option';
-                score = 50;
-              }
-              out.push({
-                selector,
-                triggerText: rawText.replace(/\s+/g, ' ').trim().slice(0, 120),
-                kind,
-                score,
-              });
-            }
-            out.sort((a, b) => b.score - a.score);
-            return out;
-          }, null)) as Action[];
+          // Actions already came from the same snapshot — zero extra evaluate.
+          // This replaces ~230 lines of inline page.evaluate with a single
+          // reference, and keeps classification consistent with the fingerprint.
+          const actions: Action[] = snapshot.actions;
 
           if (!actions.length) {
             this.logger.log(
-              `[clone:${jobId ?? 'n/a'}] ${walkLabel} no actions on step ${step}, stopping`,
+              `[clone:${jobId ?? 'n/a'}] ${walkLabel} no actions on step ${step} (type=${snapshot.stepType}), stopping`,
             );
             break;
+          }
+
+          // Loop-protection: if we revisit a signature AND all candidate
+          // actions here were already clicked in this walk, we're in a
+          // stable cycle. Bail out instead of looping forever.
+          if (!isFirstSeenInWalk) {
+            const allClicked = actions.every((a) =>
+              clickedActionsThisWalk.has(
+                `${signature}|${a.actionId ?? a.selector}`,
+              ),
+            );
+            if (allClicked) {
+              this.logger.log(
+                `[clone:${jobId ?? 'n/a'}] ${walkLabel} revisit with no fresh actions left, stopping`,
+              );
+              break;
+            }
           }
 
           // Choose action: override has priority once we hit its source
@@ -1424,15 +1615,26 @@ export class PagesService implements OnModuleInit {
           }
 
           // Record alternatives as forks to explore later (only on first
-          // visit to this state — no point re-recording).
+          // visit to this state — no point re-recording). Fork selection is
+          // step-type aware:
+          //  - radio/checkbox: forks are the OTHER options (not advance)
+          //  - branching:      forks are the other branch buttons
+          //  - generic:        any other option/advance candidate
           if (isFirstSeenGlobal) {
-            const alternatives = actions
-              .filter(
-                (a) =>
-                  a.selector !== chosen.selector &&
-                  (a.kind === 'option' || a.kind === 'advance'),
-              )
-              .slice(0, 6);
+            const forkFilter = (a: Action): boolean => {
+              if (a.selector === chosen.selector) return false;
+              if (
+                snapshot.stepType === 'radio_then_continue' ||
+                snapshot.stepType === 'checkbox_then_continue'
+              ) {
+                return a.isOption && !a.isAdvance;
+              }
+              if (snapshot.stepType === 'branching') {
+                return a.isOption;
+              }
+              return a.isOption || a.isAdvance;
+            };
+            const alternatives = actions.filter(forkFilter).slice(0, 8);
             for (const alt of alternatives) {
               pendingForks.push({
                 atSignature: signature,
@@ -1443,11 +1645,22 @@ export class PagesService implements OnModuleInit {
             }
           }
 
+          clickedActionsThisWalk.add(
+            `${signature}|${chosen.actionId ?? chosen.selector}`,
+          );
+
           // Auto-fill before advancing: ensures any gating selection is made.
-          // We always run it because some quizzes only require selection
-          // *and* a manual click; some require nothing — autofill is a no-op
-          // when there are no groups to fill.
-          if (chosen.kind === 'advance') {
+          // We only do this when the chosen action is the advance button AND
+          // the step type expects a gating selection (radio/checkbox types
+          // or generic). On pure BRANCHING screens (no Continue button, each
+          // option is its own next-state trigger) autofill would spuriously
+          // click a sibling — skip it.
+          const needsPreSelect =
+            chosen.isAdvance &&
+            (snapshot.stepType === 'radio_then_continue' ||
+              snapshot.stepType === 'checkbox_then_continue' ||
+              snapshot.stepType === 'generic');
+          if (needsPreSelect) {
             await this.autoFillSelections(page);
             await this.preSelectClickableOption(page, chosen.selector);
           }
@@ -1526,6 +1739,33 @@ export class PagesService implements OnModuleInit {
               clickedOk = true;
             } catch {
               break;
+            }
+          }
+
+          // Step-type-aware follow-up: on radio/checkbox quizzes where the
+          // fork override picked an OPTION (not the advance button), clicking
+          // the option only toggles selection — we still need to click
+          // Continue afterwards. Without this, fork-driven walks on multi-
+          // step radio quizzes stall because the signature never changes.
+          if (
+            clickedOk &&
+            !chosen.isAdvance &&
+            chosen.isOption &&
+            (snapshot.stepType === 'radio_then_continue' ||
+              snapshot.stepType === 'checkbox_then_continue')
+          ) {
+            const advanceAction = actions.find((a) => a.isAdvance);
+            if (advanceAction && advanceAction.selector !== chosen.selector) {
+              await page.waitForTimeout(250);
+              try {
+                await page.click(advanceAction.selector, {
+                  timeout: 3000,
+                  force: true,
+                  delay: 30,
+                });
+              } catch {
+                /* swallow — main advance-wait below will try alt paths */
+              }
             }
           }
 
@@ -1681,7 +1921,12 @@ export class PagesService implements OnModuleInit {
     // 1) Linear walk
     await runWalker();
 
-    // 2) Fan-out: explore alternatives at registered fork points.
+    // 2) Fan-out: explore alternatives at registered fork points — in
+    // parallel batches. Each walker owns its own Playwright page under the
+    // shared browser context, so N=3 roughly divides the wall time by 3.
+    // JS is single-threaded so the shared Map/Set/Array mutations inside
+    // `runWalker` remain race-free (no await between related reads/writes).
+    const CONCURRENT_FORKS = 3;
     let forksExplored = 0;
     while (
       pendingForks.length &&
@@ -1689,12 +1934,17 @@ export class PagesService implements OnModuleInit {
       Date.now() < deadlineAt &&
       allStates.size < MAX_TOTAL_STATES
     ) {
-      const fork = pendingForks.shift()!;
-      const key = `${fork.atSignature}|${fork.alternative.selector}`;
-      if (exploredForks.has(key)) continue;
-      exploredForks.add(key);
-      forksExplored += 1;
-      await runWalker(fork);
+      const batch: ForkPoint[] = [];
+      while (batch.length < CONCURRENT_FORKS && pendingForks.length > 0) {
+        const f = pendingForks.shift()!;
+        const key = `${f.atSignature}|${f.alternative.selector}`;
+        if (exploredForks.has(key)) continue;
+        exploredForks.add(key);
+        batch.push(f);
+      }
+      if (!batch.length) break;
+      forksExplored += batch.length;
+      await Promise.all(batch.map((f) => runWalker(f)));
     }
 
     // 3) Build variants from collected states (skip 'main' — already in
@@ -1714,6 +1964,35 @@ export class PagesService implements OnModuleInit {
     this.logger.log(
       `[clone:${jobId ?? 'n/a'}] quiz walkers done: walks=${walksRun} states=${allStates.size} edges=${navigationMap.length} forksExplored=${forksExplored} pendingForksLeft=${pendingForks.length}`,
     );
+
+    // Optional LLM audit — we feed the final state list to Ollama and log
+    // any suggested gaps. This never blocks or rolls back; it's a hint.
+    try {
+      const summary = Array.from(allStates.values()).map((s) => ({
+        stepId: s.stepId,
+        title: s.title,
+        visibleText: load(s.html).root().text().slice(0, 400),
+      }));
+      const gaps = await this.llmAssistService.findQuizGaps(summary);
+      if (gaps && gaps.length) {
+        this.logger.log(
+          `[clone:${jobId ?? 'n/a'}] LLM flagged ${gaps.length} potential gap(s): ${gaps
+            .slice(0, 4)
+            .map(
+              (g) =>
+                `${g.fromStepId}→"${g.suggestedActionText.slice(0, 24)}" (${g.reason.slice(0, 40)})`,
+            )
+            .join(' | ')}`,
+        );
+      }
+    } catch (err) {
+      this.logger.debug(
+        `[clone:${jobId ?? 'n/a'}] LLM audit skipped: ${
+          err instanceof Error ? err.message : 'unknown'
+        }`,
+      );
+    }
+
     return { variants, navigationMap };
   }
 
@@ -2560,6 +2839,70 @@ export class PagesService implements OnModuleInit {
     );
   }
 
+  /**
+   * Quiz-specific readiness probe. Far cheaper than `waitForLazyHydration`
+   * because we only care about three things:
+   *   - at least one interactive element is visible
+   *   - the body has some text (question rendered)
+   *   - no explicit loader/skeleton is visible
+   * Typical return time: 400-1400ms for SPAs like no.diet, vs 6-8s for the
+   * generic hydration probe. We poll the `QUIZ_STATE_BROWSER_JS` payload so
+   * the same evaluation code feeds readiness + fingerprint later.
+   */
+  private async waitForQuizStepReady(
+    page: {
+      evaluate: <T, A>(
+        pageFunction: (arg: A) => Promise<T> | T,
+        arg: A,
+      ) => Promise<T>;
+      waitForTimeout: (ms: number) => Promise<void>;
+    },
+    options: { timeoutMs?: number; minInteractives?: number } = {},
+  ): Promise<QuizStateSnapshot | null> {
+    const timeoutMs = options.timeoutMs ?? 4500;
+    const minInteractives = options.minInteractives ?? 1;
+    const deadline = Date.now() + timeoutMs;
+    let lastSnapshot: QuizStateSnapshot | null = null;
+    let lastChildCount = -1;
+    let stableRounds = 0;
+    while (Date.now() < deadline) {
+      const snapshot = (await page
+        .evaluate((script: string) => {
+          try {
+            // eslint-disable-next-line no-eval
+            return eval(script);
+          } catch {
+            return null;
+          }
+        }, QUIZ_STATE_BROWSER_JS)
+        .catch(() => null)) as QuizStateSnapshot | null;
+      if (!snapshot) {
+        await page.waitForTimeout(220);
+        continue;
+      }
+      lastSnapshot = snapshot;
+      const { readiness } = snapshot;
+      const interactivesOk = readiness.interactiveCount >= minInteractives;
+      const hasTextOrQuestion =
+        readiness.textLen >= 30 || readiness.hasQuestion;
+      const loaderAbsent = !readiness.hasLoader;
+      if (interactivesOk && hasTextOrQuestion && loaderAbsent) {
+        if (readiness.domChildCount === lastChildCount) {
+          stableRounds += 1;
+          if (stableRounds >= 1) return snapshot;
+        } else {
+          stableRounds = 0;
+          lastChildCount = readiness.domChildCount;
+        }
+      } else {
+        stableRounds = 0;
+        lastChildCount = readiness.domChildCount;
+      }
+      await page.waitForTimeout(220);
+    }
+    return lastSnapshot;
+  }
+
   private async clickQuizProgressiveActions(page: {
     evaluate: <T, A>(
       pageFunction: (arg: A) => Promise<T> | T,
@@ -3030,6 +3373,7 @@ export class PagesService implements OnModuleInit {
 
     this.normalizeLazyMedia($);
     this.absolutizeUrls($, baseHref);
+    injectStableIdsOnCheerio($);
 
     return $.html();
   }
@@ -3096,6 +3440,15 @@ export class PagesService implements OnModuleInit {
     });
   }
 
+  private hashShort(value: string): string {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < value.length; i += 1) {
+      h ^= value.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(36).padStart(7, '0').slice(0, 9);
+  }
+
   private buildBaseHref(sourceUrl: string): string {
     const parsed = new URL(sourceUrl);
     parsed.hash = '';
@@ -3138,10 +3491,17 @@ export class PagesService implements OnModuleInit {
     const anchors: CustomizationAnchor[] = [];
     for (const page of publicPages) {
       const stepId = page.stepId ?? 'main';
-      const ignoreSelectors = navigationMap
-        .filter((edge) => edge.fromStepId === stepId)
-        .map((edge) => edge.selector);
+      const edgesForStep = navigationMap.filter(
+        (edge) => edge.fromStepId === stepId,
+      );
+      const ignoreIds = edgesForStep
+        .map((edge) => edge.actionId)
+        .filter((id): id is string => Boolean(id));
+      const ignoreSelectors = edgesForStep
+        .map((edge) => edge.selector)
+        .filter((s): s is string => Boolean(s));
       const detected = detectCustomizationAnchors(page.html, stepId, {
+        ignoreIds,
         ignoreSelectors,
       });
       anchors.push(...detected);
@@ -3311,10 +3671,14 @@ export class PagesService implements OnModuleInit {
     const customizationAnchors = Array.isArray(meta.customizationAnchors)
       ? (meta.customizationAnchors as CustomizationAnchor[])
       : [];
-    const customizationValues =
+    const rawCustomizationValues =
       meta.customizationValues && typeof meta.customizationValues === 'object'
         ? (meta.customizationValues as CustomizationValues)
         : {};
+    const customizationValues = expandValuesAcrossGroups(
+      customizationAnchors,
+      rawCustomizationValues,
+    );
 
     const steps = publicPages.length
       ? publicPages
