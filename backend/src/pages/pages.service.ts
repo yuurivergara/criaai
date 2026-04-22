@@ -43,6 +43,10 @@ import {
   type QuizAction,
   type QuizStateSnapshot,
 } from './quiz-state.util';
+import {
+  QUIZ_GATE_RESOLVER_BROWSER_JS,
+  type GateResolverReport,
+} from './quiz-gate-resolver.util';
 
 interface CapturedPublicPage {
   url: string;
@@ -1663,6 +1667,16 @@ export class PagesService implements OnModuleInit {
           if (needsPreSelect) {
             await this.autoFillSelections(page);
             await this.preSelectClickableOption(page, chosen.selector);
+            // Handle "disabled Continue" gates: free-text / numeric / select
+            // inputs that must be filled before the advance button wakes up.
+            // autoFillSelections() only handles radios/checkboxes — this
+            // complements it for the no.diet-style height/weight/email/DOB
+            // forms that caused the walker to stall mid-walk.
+            await this.resolveQuizGateInputs(page, jobId, walkLabel);
+            // Give the SPA a tick to propagate validation state, then wait
+            // for the button to become enabled before issuing the click.
+            await page.waitForTimeout(150);
+            await this.waitForAdvanceEnabled(page, 1500);
           }
 
           const beforeUrl = page.url();
@@ -1810,6 +1824,10 @@ export class PagesService implements OnModuleInit {
             // option cards that need to be marked first.
             await this.autoFillSelections(page);
             await this.clickAnyVisibleOption(page, chosen.selector);
+            // Also re-attempt gate resolution in case validation reset
+            // values (common on branch transitions that re-render forms).
+            await this.resolveQuizGateInputs(page, jobId, walkLabel);
+            await this.waitForAdvanceEnabled(page, 1200);
             await page.waitForTimeout(400);
             try {
               await page.click(chosen.selector, {
@@ -2118,6 +2136,181 @@ export class PagesService implements OnModuleInit {
         /* swallow */
       }
     }, null);
+  }
+
+  /**
+   * Resolve "gate" inputs that keep the Continue button disabled — text,
+   * number, email, phone, date, select and textarea fields. Works in two
+   * phases:
+   *
+   *   1. Heuristic pass (browser, <50ms): fills everything it recognizes
+   *      using attribute/label-based rules. React-safe setter is used so
+   *      controlled components pick up the value.
+   *   2. LLM fallback (only if phase 1 left gaps AND advance still disabled):
+   *      asks Ollama for plausible values for the remaining fields. Result
+   *      is cached by gateSignature across walks/forks.
+   *
+   * Returns a lightweight summary for logging.
+   */
+  private async resolveQuizGateInputs(
+    page: {
+      evaluate: <T, A>(
+        pageFunction: (arg: A) => Promise<T> | T,
+        arg: A,
+      ) => Promise<T>;
+    },
+    jobId: string | undefined,
+    walkLabel: string,
+  ): Promise<{ filled: number; unresolved: number; usedLlm: boolean }> {
+    // Install the browser helper once per page (idempotent).
+    await page
+      .evaluate((script: string) => {
+        try {
+          // eslint-disable-next-line no-eval
+          eval(script);
+        } catch {
+          /* swallow */
+        }
+      }, QUIZ_GATE_RESOLVER_BROWSER_JS)
+      .catch(() => undefined);
+
+    const report = await page
+      .evaluate((_arg: unknown) => {
+        const api = (window as unknown as {
+          __criaaiGateResolver?: { run: () => GateResolverReport };
+        }).__criaaiGateResolver;
+        if (!api) return null;
+        try {
+          return api.run();
+        } catch {
+          return null;
+        }
+      }, null)
+      .catch(() => null);
+
+    if (!report) {
+      return { filled: 0, unresolved: 0, usedLlm: false };
+    }
+
+    const heuristicFilled = report.fields.filter((f) => f.resolved).length;
+    let usedLlm = false;
+
+    if (report.unresolved.length > 0 && report.advanceStillDisabled) {
+      // Phase 2: LLM fallback for the leftover fields.
+      try {
+        const heading = report.fields[0]?.questionText ?? '';
+        const suggestions = await this.llmAssistService.resolveFormGate(
+          report.gateSignature,
+          report.unresolved.map((f) => ({
+            selector: f.selector,
+            tag: f.tag,
+            type: f.type,
+            idLabel: f.idLabel,
+            questionText: f.questionText,
+          })),
+          heading,
+        );
+        if (suggestions.length) {
+          usedLlm = true;
+          await page
+            .evaluate((items: unknown) => {
+              const api = (window as unknown as {
+                __criaaiGateResolver?: {
+                  applyLlm: (
+                    items: Array<{ selector: string; value: string }>,
+                  ) => number;
+                };
+              }).__criaaiGateResolver;
+              if (!api) return 0;
+              try {
+                return api.applyLlm(
+                  items as Array<{ selector: string; value: string }>,
+                );
+              } catch {
+                return 0;
+              }
+            }, suggestions)
+            .catch(() => 0);
+          this.logger.log(
+            `[clone:${jobId ?? 'n/a'}] ${walkLabel} gate LLM fallback applied ${suggestions.length} field(s) (sig=${report.gateSignature})`,
+          );
+        }
+      } catch (err) {
+        this.logger.debug(
+          `[clone:${jobId ?? 'n/a'}] ${walkLabel} gate LLM fallback error: ${
+            err instanceof Error ? err.message : 'unknown'
+          }`,
+        );
+      }
+    }
+
+    if (heuristicFilled || report.unresolved.length) {
+      this.logger.debug(
+        `[clone:${jobId ?? 'n/a'}] ${walkLabel} gate resolver filled=${heuristicFilled} unresolved=${
+          report.unresolved.length
+        } advanceDisabled=${report.advanceStillDisabled} rules=${report.fields
+          .map((f) => f.ruleId)
+          .join(',')}`,
+      );
+    }
+
+    return {
+      filled: heuristicFilled,
+      unresolved: report.unresolved.length,
+      usedLlm,
+    };
+  }
+
+  /**
+   * Poll until an advance/submit button on the page becomes enabled,
+   * or the deadline hits. Returns true when at least one advance button
+   * is clickable (`:not([disabled])` + aria-disabled not "true").
+   */
+  private async waitForAdvanceEnabled(
+    page: {
+      evaluate: <T, A>(
+        pageFunction: (arg: A) => Promise<T> | T,
+        arg: A,
+      ) => Promise<T>;
+      waitForTimeout: (ms: number) => Promise<void>;
+    },
+    timeoutMs = 1500,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const enabled = await page
+        .evaluate((_arg: unknown) => {
+          const all = Array.from(
+            document.querySelectorAll<HTMLElement>('button, [role="button"]'),
+          );
+          for (const el of all) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 2 || rect.height <= 2) continue;
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+            const text = (el.textContent || '').toLowerCase().trim();
+            const dt = (
+              el.getAttribute('data-testid') || ''
+            ).toLowerCase();
+            const looksAdvance =
+              (el as HTMLButtonElement).type === 'submit' ||
+              /(continuar|continue|next|siguiente|avancar|avanzar|submit|enviar|empezar|comecar|start|ok)/.test(
+                text,
+              ) ||
+              /continue|submit|advance|next|start/.test(dt);
+            if (!looksAdvance) continue;
+            const disabled =
+              (el as HTMLButtonElement).disabled === true ||
+              el.getAttribute('aria-disabled') === 'true';
+            if (!disabled) return true;
+          }
+          return false;
+        }, null)
+        .catch(() => false);
+      if (enabled) return true;
+      await page.waitForTimeout(100);
+    }
+    return false;
   }
 
   /**

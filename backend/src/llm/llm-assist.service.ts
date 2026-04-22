@@ -34,6 +34,24 @@ export interface QuizGapSuggestion {
   reason: string;
 }
 
+export interface GateFieldContext {
+  /** CSS selector used to find the input/select/textarea. */
+  selector: string;
+  /** input | select | textarea. */
+  tag: string;
+  /** type attribute of the element (text|number|email...). */
+  type: string;
+  /** name|id|data-testid — helps the LLM identify the field semantically. */
+  idLabel: string;
+  /** Nearby label/heading/placeholder describing the question. */
+  questionText: string;
+}
+
+export interface GateFieldAnswer {
+  selector: string;
+  value: string;
+}
+
 /**
  * High-level LLM helpers dedicated to the page-clone pipeline.
  *
@@ -48,6 +66,15 @@ export interface QuizGapSuggestion {
 @Injectable()
 export class LlmAssistService {
   private readonly logger = new Logger(LlmAssistService.name);
+
+  /**
+   * Cache for `resolveFormGate`. Keyed by the browser-side gate signature
+   * (FNV-1a of all field labels + question text). This lives for the whole
+   * Node process lifetime — the clone pipeline is short-lived in practice
+   * and re-hitting the same gate inside a single walk (across forks) is the
+   * common case we want to cheapen.
+   */
+  private readonly gateCache = new Map<string, GateFieldAnswer[]>();
 
   constructor(private readonly ollama: OllamaLlmProvider) {}
 
@@ -313,6 +340,101 @@ export class LlmAssistService {
         }`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Resolve a "form gate" where the deterministic heuristic could not find
+   * a sensible value for every unfilled field. Returns the selectors paired
+   * with the value the LLM thinks makes sense so the walker can fill them.
+   *
+   * Results are cached by `gateSignature` — the same gate on a different
+   * walker/fork does NOT trigger another LLM roundtrip.
+   *
+   * Returns an empty array when Ollama is unreachable or the response is
+   * malformed. The walker is expected to degrade gracefully in that case.
+   */
+  async resolveFormGate(
+    gateSignature: string,
+    fields: GateFieldContext[],
+    questionHeading = '',
+  ): Promise<GateFieldAnswer[]> {
+    if (!fields.length) return [];
+    const cached = this.gateCache.get(gateSignature);
+    if (cached) return cached;
+    if (!(await this.ollama.isReachable())) return [];
+
+    try {
+      const payload = fields.slice(0, 12).map((f) => ({
+        selector: f.selector,
+        tag: f.tag,
+        type: f.type,
+        id: f.idLabel.slice(0, 80),
+        question: f.questionText.slice(0, 240),
+      }));
+      const prompt = [
+        'You are assisting a quiz cloner. The quiz has a "Continue" button that is DISABLED until the fields below are filled with plausible values.',
+        'Return JSON only: {"fields":[{"selector":"<copied from input>","value":"<string to type>"}]}.',
+        'Rules:',
+        '- Use realistic but generic values (age 30, height 170 cm, weight 70 kg, email teste@criaai.local, phone +5511999999999).',
+        '- Respect the apparent unit (cm vs in, kg vs lb) from question/label.',
+        '- For selects, pick the FIRST non-placeholder option value (if unclear, guess a common value).',
+        '- Never output empty strings. Never output code or explanations.',
+        `Question heading: ${questionHeading.slice(0, 240)}`,
+        `Fields: ${JSON.stringify(payload)}`,
+      ].join('\n');
+
+      const raw = await this.ollama.chat({
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You only output valid JSON that matches the requested schema.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        jsonMode: true,
+        timeoutMs: 12_000,
+      });
+      const answers = this.safeParseGateFields(raw);
+      if (answers.length) {
+        this.gateCache.set(gateSignature, answers);
+      }
+      return answers;
+    } catch (err) {
+      this.logger.debug(
+        `resolveFormGate failed: ${
+          err instanceof Error ? err.message : 'unknown'
+        }`,
+      );
+      return [];
+    }
+  }
+
+  private safeParseGateFields(raw: string): GateFieldAnswer[] {
+    try {
+      const data = JSON.parse(raw) as { fields?: unknown };
+      if (!data || !Array.isArray(data.fields)) return [];
+      const out: GateFieldAnswer[] = [];
+      for (const entry of data.fields) {
+        if (!entry || typeof entry !== 'object') continue;
+        const rec = entry as Record<string, unknown>;
+        if (typeof rec.selector !== 'string' || !rec.selector.trim()) continue;
+        // Reject non-primitive values — the LLM sometimes hallucinates
+        // nested objects here ("value": { ... }) which would stringify to
+        // "[object Object]" and get typed verbatim.
+        const rawValue = rec.value;
+        let value = '';
+        if (typeof rawValue === 'string') value = rawValue;
+        else if (typeof rawValue === 'number' || typeof rawValue === 'boolean')
+          value = String(rawValue);
+        value = value.slice(0, 200);
+        if (!value) continue;
+        out.push({ selector: rec.selector.trim(), value });
+      }
+      return out;
+    } catch {
+      return [];
     }
   }
 

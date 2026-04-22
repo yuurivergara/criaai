@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Descubra Seu Plano Personalizado</title>
+    <style>
+        /* --- ESTILOS GERAIS (CSS) --- */
+        :root {
+            --primary-color: #2ecc71; /* Verde Saúde */
+            --primary-dark: #27ae60;
+            --accent-color: #e74c3c; /* Vermelho Urgência */
+            --text-color: #2c3e50;
+            --bg-color: #f4f7f6;
+            --white: #ffffff;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--white);
+            width: 100%;
+            max-width: 600px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            overflow: hidden;
+            position: relative;
+            min-height: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- BARRA DE PROGRESSO --- */
+        .progress-header {
+            padding: 20px 30px 0;
+        }
+        
+        .progress-track {
+            background: #e0e0e0;
+            height: 8px;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            background: var(--primary-color);
+            height: 100%;
+            width: 0%;
+            transition: width 0.5s ease-in-out;
+        }
+
+        /* --- CONTEÚDO DAS TELAS --- */
+        .screen {
+            padding: 40px 30px;
+            flex: 1;
+            display: none; /* Escondido por padrão */
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .screen.active {
+            display: flex;
+        }
+
+        h1 {
+            font-size: 26px;
+            margin-bottom: 15px;
+            color: #333;
+            line-height: 1.3;
+        }
+
+        p.subtitle {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        /* --- BOTÕES E OPÇÕES --- */
+        .options-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 15px;
+            width: 100%;
+        }
+
+        .btn-option {
+            background: var(--white);
+            border: 2px solid #e0e0e0;
+            padding: 18px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-color);
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: left;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .btn-option:hover {
+            border-color: var(--primary-color);
+            background-color: #f0fff4;
+            transform: translateY(-2px);
+        }
+
+        .btn-option::after {
+            content: '›';
+            font-size: 20px;
+            color: #ccc;
+        }
+
+        .btn-option:hover::after {
+            color: var(--primary-color);
+        }
+
+        /* --- TELA DE CARREGAMENTO (ANÁLISE) --- */
+        .loader {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid var(--primary-color);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        .analysis-list {
+            text-align: left;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #555;
+            list-style: none;
+        }
+
+        .analysis-list li {
+            margin-bottom: 8px;
+            opacity: 0;
+            transform: translateX(-10px);
+            animation: slideIn 0.5s forwards;
+        }
+
+        /* --- TELA FINAL (OFERTA) --- */
+        .final-badge {
+            background: #ffeaa7;
+            color: #d35400;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+        }
+
+        .cta-button {
+            background: var(--accent-color);
+            color: white;
+            text-decoration: none;
+            padding: 18px 30px;
+            border-radius: 50px;
+            font-size: 18px;
+            font-weight: bold;
+            width: 100%;
+            display: block;
+            margin-top: 20px;
+            box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4);
+            animation: pulse 2s infinite;
+            border: none;
+            cursor: pointer;
+        }
+
+        .guarantee {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+        }
+
+        /* --- ANIMAÇÕES --- */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes slideIn {
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
+
+        /* Responsividade para Desktop */
+        @media (min-width: 600px) {
+            .options-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            .btn-option {
+                justify-content: center;
+                text-align: center;
+            }
+            .btn-option::after {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- Cabeçalho com Barra de Progresso -->
+    <div class="progress-header">
+        <div class="progress-track">
+            <div class="progress-fill" id="progressBar"></div>
+        </div>
+    </div>
+
+    <!-- TELA 1: Introdução -->
+    <div class="screen active" id="screen-1">
+        <h1>Descubra o Método Personalizado Para Seu Corpo</h1>
+        <p class="subtitle">Responda a 3 perguntas rápidas e receba um plano nutricional adaptado ao seu metabolismo.</p>
+        <div class="options-grid">
+            <button class="btn-option" onclick="nextScreen(2)">Começar Agora</button>
+        </div>
+    </div>
+
+    <!-- TELA 2: Gênero -->
+    <div class="screen" id="screen-2">
+        <h1>Para começarmos, qual é o seu gênero?</h1>
+        <div class="options-grid">
+            <button class="btn-option" onclick="selectOption(3, 'Masculino')">Masculino</button>
+            <button class="btn-option" onclick="selectOption(3, 'Feminino')">Feminino</button>
+        </div>
+    </div>
+
+    <!-- TELA 3: Objetivo -->
+    <div class="screen" id="screen-3">
+        <h1>Qual é o seu principal objetivo hoje?</h1>
+        <div class="options-grid">
+            <button class="btn-option" onclick="selectOption(4, 'Perder Peso')">Perder peso de forma saudável</button>
+            <button class="btn-option" onclick="selectOption(4, 'Manter Peso')">Manter meu peso atual</button>
+            <button class="btn-option" onclick="selectOption(4, 'Ganhar Massa')">Ganhar massa muscular</button>
+        </div>
+    </div>
+
+    <!-- TELA 4: Idade -->
+    <div class="screen" id="screen-4">
+        <h1>Qual a sua faixa etária?</h1>
+        <div class="options-grid">
+            <button class="btn-option" onclick="startAnalysis()">18 - 29 anos</button>
+            <button class="btn-option" onclick="startAnalysis()">30 - 45 anos</button>
+            <button class="btn-option" onclick="startAnalysis()">46 - 60 anos</button>
+            <button class="btn-option" onclick="startAnalysis()">Acima de 60 anos</button>
+        </div>
+    </div>
+
+    <!-- TELA 5: Análise (Loading) -->
+    <div class="screen" id="screen-loading">
+        <div class="loader"></div>
+        <h2 id="loading-text">Calculando seu perfil...</h2>
+        <ul class="analysis-list" id="analysis-steps">
+            <!-- Itens inseridos via JS -->
+        </ul>
+    </div>
+
+    <!-- TELA 6: Resultado/Oferta -->
+    <div class="screen" id="screen-result">
+        <div class="final-badge">Plano Aprovado</div>
+        <h1>Seu Plano Está Pronto!</h1>
+        <p class="subtitle">Com base nas suas respostas, identificamos que você tem alta probabilidade de sucesso com nosso método de 30 dias.</p>
+        
+        <div style="background: #f9f9f9; padding: 15px; border-radius: 8px; width: 100%; margin-bottom: 20px; text-align: left;">
+            <strong>✅ Perfil:</strong> <span id="user-profile-display">Carregando...</span><br>
+            <strong>✅ Meta:</strong> <span id="user-goal-display">Carregando...</span>
+        </div>
+
+        <button class="cta-button" onclick="alert('Redirecionar para Checkout ou Página de Vendas')">VER MEU PLANO AGORA</button>
+        
+        <div class="guarantee">
+            🔒 Seus dados estão 100% seguros e protegidos.
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- LÓGICA DO QUIZ (JAVASCRIPT) ---
+    
+    let currentStep = 1;
+    const totalSteps = 4; // Número de perguntas reais
+    let userData = {};
+
+    function updateProgress(step) {
+        const percentage = ((step - 1) / totalSteps) * 100;
+        document.getElementById('progressBar').style.width = percentage + '%';
+    }
+
+    function showScreen(screenId) {
+        // Esconde todas as telas
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        // Mostra a tela desejada
+        document.getElementById(screenId).classList.add('active');
+    }
+
+    function nextScreen(stepNumber) {
+        currentStep = stepNumber;
+        updateProgress(stepNumber);
+        showScreen('screen-' + stepNumber);
+    }
+
+    function selectOption(nextStep, value) {
+        // Salva a resposta do usuário (pode ser usado para URL params depois)
+        if(currentStep === 2) userData.gender = value;
+        if(currentStep === 3) userData.goal = value;
+        
+        nextScreen(nextStep);
+    }
+
+    function startAnalysis() {
+        // Vai para a tela de loading
+        showScreen('screen-loading');
+        document.getElementById('progressBar').style.width = '100%';
+        
+        // Simula o processo de análise passo a passo
+        const steps = [
+            "Analisando metabolismo basal...",
+            "Calculando necessidades calóricas...",
+            "Gerando plano alimentar...",
+            "Finalizando..."
+        ];
+
+        const listContainer = document.getElementById('analysis-steps');
+        let delay = 0;
+
+        steps.forEach((text, index) => {
+            setTimeout(() => {
+                const li = document.createElement('li');
+                li.textContent = text;
+                listContainer.appendChild(li);
+                
+                // Se for o último passo, vai para o resultado
+                if (index === steps.length - 1) {
+                    setTimeout(showResult, 800);
+                }
+            }, delay);
+            delay += 800; // 800ms entre cada passo
+        });
+    }
+
+    function showResult() {
+        // Preenche os dados na tela final
+        document.getElementById('user-profile-display').textContent = userData.gender || 'Personalizado';
+        document.getElementById('user-goal-display').textContent = userData.goal || 'Saúde';
+        
+        showScreen('screen-result');
+    }
+</script>
+
+</body>
+</html>

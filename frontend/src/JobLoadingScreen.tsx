@@ -75,10 +75,16 @@ interface CustomizationAnchor {
   stepId: string;
   kind: 'checkout' | 'video';
   selector: string;
+  stableId?: string;
   label: string;
   currentValue?: string;
   tag: string;
   provider?: string;
+  /**
+   * `rewrite-href` | `rewrite-action` | `rewrite-src` | `inject-click` |
+   * `replace-embed`. Older versions don't send this — defaults kick in.
+   */
+  behavior?: string;
 }
 
 function extractCustomizationAnchors(meta: unknown): CustomizationAnchor[] {
@@ -104,11 +110,13 @@ function extractCustomizationAnchors(meta: unknown): CustomizationAnchor[] {
         stepId: c.stepId,
         kind: c.kind,
         selector: c.selector,
+        stableId: typeof c.stableId === 'string' ? c.stableId : undefined,
         label: c.label,
         tag: c.tag,
         currentValue:
           typeof c.currentValue === 'string' ? c.currentValue : undefined,
         provider: typeof c.provider === 'string' ? c.provider : undefined,
+        behavior: typeof c.behavior === 'string' ? c.behavior : undefined,
       };
     })
     .filter((item): item is CustomizationAnchor => item !== null);
@@ -119,6 +127,7 @@ interface NavigationEdgeView {
   toStepId: string;
   selector: string;
   triggerText?: string;
+  actionId?: string;
 }
 
 function extractNavigationMap(meta: unknown): NavigationEdgeView[] {
@@ -142,6 +151,7 @@ function extractNavigationMap(meta: unknown): NavigationEdgeView[] {
         selector: e.selector,
         triggerText:
           typeof e.triggerText === 'string' ? e.triggerText : undefined,
+        actionId: typeof e.actionId === 'string' ? e.actionId : undefined,
       };
     })
     .filter((item): item is NavigationEdgeView => item !== null);
@@ -410,6 +420,20 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     });
   }, [job, minReady, page, pageError, terminal]);
 
+  // When the generate job finishes, the backend already auto-publishes the
+  // page. Reflect that in publishState so the header CTA shows "Republicar"
+  // and the share URL is immediately visible in the publish modal.
+  useEffect(() => {
+    if (job?.status !== 'completed') return;
+    const url = job?.result?.publicUrl;
+    if (!url) return;
+    setPublishState((prev) =>
+      prev.status === 'done' && prev.publicUrl === url
+        ? prev
+        : { status: 'done', publicUrl: url },
+    );
+  }, [job?.status, job?.result?.publicUrl]);
+
   useEffect(() => {
     const sourceHtml = page?.latestVersion?.html;
     if (!sourceHtml) {
@@ -594,6 +618,9 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             kind: a.kind,
             tag: a.tag,
             selector: a.selector,
+            stableId: a.stableId,
+            behavior: a.behavior,
+            label: a.label,
             value: values[a.id] ?? '',
           })),
         },
@@ -626,6 +653,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             edge.toStepId.toUpperCase();
           return {
             selector: edge.selector,
+            actionId: edge.actionId,
             label: friendly.length > 22 ? `${friendly.slice(0, 22)}…` : friendly,
             stepId: edge.toStepId,
             triggerText: edge.triggerText,
@@ -1019,6 +1047,32 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             </div>
 
             <div className="editor-topbar-right">
+              {publishState.status === 'done' && publishState.publicUrl ? (
+                <a
+                  href={publishState.publicUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="editor-btn editor-btn-ghost"
+                  title={`Abrir ${publishState.publicUrl}`}
+                  style={{
+                    maxWidth: 280,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    textDecoration: 'none',
+                  }}
+                >
+                  <IconCheck />
+                  <span
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {publishState.publicUrl.replace(/^https?:\/\//, '')}
+                  </span>
+                </a>
+              ) : null}
               <button
                 type="button"
                 className="editor-btn editor-btn-ghost"
@@ -1613,9 +1667,15 @@ function ensureEditorIds(html: string): string {
   let cursor = 0;
   candidates.forEach((el) => {
     const element = el as HTMLElement;
-    if (!element.dataset.editorId) {
-      element.dataset.editorId = `ed-${cursor + 1}`;
+    if (element.dataset.editorId) return;
+    // Prefer the already-injected stable id (data-criaai-id) so editor refs
+    // stay stable across walker re-runs and per-step navigations.
+    const stable = element.getAttribute('data-criaai-id');
+    if (stable) {
+      element.dataset.editorId = stable;
+    } else {
       cursor += 1;
+      element.dataset.editorId = `ed-${cursor}`;
     }
   });
   return doc.documentElement.outerHTML;
@@ -1734,6 +1794,40 @@ const EDITOR_BRIDGE_CSS = `
 
 const EDITOR_BRIDGE_JS = `(() => {
   const MEDIA_TAGS = new Set(['IMG','VIDEO','IFRAME','AUDIO','SOURCE','PICTURE']);
+  // Multi-strategy element resolver. Used by applyCustomizations and
+  // markNavigation: the backend sends us the anchor/edge with three possible
+  // keys — prefer the most stable one, degrade gracefully.
+  const resolveEl = (item) => {
+    if (!item) return null;
+    // 1) stable id (data-criaai-id / stableId / actionId)
+    const stable = item.stableId || item.actionId;
+    if (stable) {
+      try {
+        const el = document.querySelector('[data-criaai-id="' + CSS.escape(stable) + '"]');
+        if (el) return el;
+      } catch (_) {}
+    }
+    // 2) css selector
+    if (item.selector) {
+      try {
+        const el = document.querySelector(item.selector);
+        if (el) return el;
+      } catch (_) {}
+    }
+    // 3) text fallback: match an <a>/<button>/<label> whose trimmed text
+    //    equals the provided label or triggerText.
+    const needle = (item.label || item.triggerText || '').trim().toLowerCase();
+    if (needle) {
+      try {
+        const candidates = document.querySelectorAll('a,button,[role="button"],label,[role="radio"],[role="option"],iframe,video,form');
+        for (const c of candidates) {
+          const t = (c.innerText || c.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          if (t && (t === needle || (needle.length >= 8 && t.indexOf(needle) !== -1))) return c;
+        }
+      } catch (_) {}
+    }
+    return null;
+  };
   const findEditable = (start) => {
     let node = start;
     while (node && node !== document.body && node.nodeType === 1) {
@@ -1830,9 +1924,8 @@ const EDITOR_BRIDGE_JS = `(() => {
           node.removeAttribute('data-criaai-nav');
         });
         for (const item of data.items) {
-          if (!item || !item.selector) continue;
-          let el = null;
-          try { el = document.querySelector(item.selector); } catch (_) {}
+          if (!item) continue;
+          var el = resolveEl(item);
           if (!el) continue;
           const label = String(item.label || '').slice(0, 32);
           const stepId = String(item.stepId || '');
@@ -1855,53 +1948,82 @@ const EDITOR_BRIDGE_JS = `(() => {
     }
     if (data.type === 'editor.applyCustomizations' && Array.isArray(data.items)) {
       data.items.forEach((item) => {
-        if (!item || !item.selector) return;
-        let target;
-        try { target = document.querySelector(item.selector); } catch (_) { target = null; }
+        if (!item) return;
+        var target = resolveEl(item);
         if (!target) return;
         const value = (item.value || '').trim();
+        const behavior = item.behavior || (item.kind === 'video' ? (item.tag === 'iframe' || item.tag === 'video' ? 'rewrite-src' : 'replace-embed') : (item.tag === 'a' ? 'rewrite-href' : item.tag === 'form' ? 'rewrite-action' : 'inject-click'));
         if (item.kind === 'checkout') {
           if (!value) {
-            // No-op: keep original href; visual hint only.
             target.setAttribute('data-criaai-custom', item.id || '');
             return;
           }
-          if (item.tag === 'a') {
-            target.setAttribute('href', value);
-            target.removeAttribute('target');
-          } else if (item.tag === 'form') {
+          if (behavior === 'rewrite-href') {
+            if (target.tagName === 'A') {
+              target.setAttribute('href', value);
+              target.removeAttribute('target');
+            } else {
+              const parent = target.closest && target.closest('a[href]');
+              if (parent) {
+                parent.setAttribute('href', value);
+                parent.removeAttribute('target');
+              } else {
+                target.setAttribute('href', value);
+              }
+            }
+          } else if (behavior === 'rewrite-action') {
             target.setAttribute('action', value);
           } else {
-            const parent = target.closest && target.closest('a[href]');
-            if (parent) {
-              parent.setAttribute('href', value);
-              parent.removeAttribute('target');
-            } else {
-              target.setAttribute('data-href', value);
-            }
+            target.setAttribute('data-href', value);
+            target.setAttribute('onclick', "window.top?window.top.location.href='" + value.replace(/'/g, "\\'") + "':window.location.href='" + value.replace(/'/g, "\\'") + "';return false;");
           }
           target.setAttribute('data-criaai-custom', item.id || '');
         } else if (item.kind === 'video') {
           if (!value) return;
-          if (item.tag === 'iframe') {
+          if (behavior === 'rewrite-src') {
             target.setAttribute('src', value);
             target.removeAttribute('srcdoc');
-          } else if (item.tag === 'video') {
-            target.setAttribute('src', value);
-            const sources = target.querySelectorAll && target.querySelectorAll('source');
-            if (sources && sources.length) sources.forEach((s) => s.remove());
+            if (target.tagName === 'VIDEO') {
+              const sources = target.querySelectorAll && target.querySelectorAll('source');
+              if (sources && sources.length) sources.forEach((s) => s.remove());
+            }
           } else {
-            const w = target.getAttribute('width') || '100%';
-            const h = target.getAttribute('height') || '420';
-            const iframe = document.createElement('iframe');
-            iframe.src = value;
-            iframe.width = w;
-            iframe.height = h;
-            iframe.frameBorder = '0';
-            iframe.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture');
-            iframe.setAttribute('allowfullscreen', '');
-            iframe.setAttribute('data-criaai-custom', item.id || '');
-            target.replaceWith(iframe);
+            var isSlotContainer = target.hasAttribute && (target.hasAttribute('data-criaai-vsl') || (target.classList && target.classList.contains('sp-vsl-frame')));
+            if (isSlotContainer) {
+              // Try to reuse an existing iframe inside the slot for snappier
+              // live updates; otherwise, reset the slot and inject one.
+              var existing = target.querySelector && target.querySelector('iframe[data-criaai-custom], iframe');
+              if (existing) {
+                existing.setAttribute('src', value);
+                existing.setAttribute('data-criaai-custom', item.id || '');
+              } else {
+                while (target.firstChild) target.removeChild(target.firstChild);
+                if (target.classList) target.classList.remove('sp-vsl-placeholder');
+                var iframeA = document.createElement('iframe');
+                iframeA.src = value;
+                iframeA.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture; encrypted-media');
+                iframeA.setAttribute('allowfullscreen', '');
+                iframeA.setAttribute('frameborder', '0');
+                iframeA.setAttribute('data-criaai-custom', item.id || '');
+                iframeA.style.width = '100%';
+                iframeA.style.height = '100%';
+                iframeA.style.border = '0';
+                iframeA.style.display = 'block';
+                target.appendChild(iframeA);
+              }
+            } else {
+              var w = target.getAttribute('width') || '100%';
+              var h = target.getAttribute('height') || '420';
+              var iframeB = document.createElement('iframe');
+              iframeB.src = value;
+              iframeB.width = w;
+              iframeB.height = h;
+              iframeB.frameBorder = '0';
+              iframeB.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture');
+              iframeB.setAttribute('allowfullscreen', '');
+              iframeB.setAttribute('data-criaai-custom', item.id || '');
+              target.replaceWith(iframeB);
+            }
           }
         }
       });
