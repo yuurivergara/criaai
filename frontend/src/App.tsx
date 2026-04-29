@@ -2,7 +2,20 @@ import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { API_BASE } from './apiConfig';
-import { JobLoadingScreen } from './JobLoadingScreen';
+import JobLoadingScreen from './JobLoadingScreen';
+import { AuthProvider, useAuth, getStoredAuthToken } from './auth/AuthContext';
+import { AuthScreen } from './auth/AuthScreen';
+import { DashboardScreen } from './auth/DashboardScreen';
+import './auth/auth.css';
+
+/** Authorization header helper used by the legacy fetches in App.tsx. */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = getStoredAuthToken();
+  const base: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+  return { ...base, ...(extra ?? {}) };
+}
 
 type Mode = 'clone' | 'generate';
 type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'blocked';
@@ -99,7 +112,9 @@ function useJobsStream() {
       const updates = await Promise.all(
         activeJobIds.map(async (jobId) => {
           try {
-            const response = await fetch(`${API_BASE}/jobs/${jobId}`);
+            const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
+              headers: authHeaders(),
+            });
             if (!response.ok) return null;
             return (await response.json()) as JobRecord;
           } catch {
@@ -173,6 +188,9 @@ function CloneConsole({ jobs, onRegister, onOpenJob }: ConsoleProps) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  /** Troca réguas/sliders JS por campo de texto (recomendado no editor). */
+  const [simplifyInteractiveWidgets, setSimplifyInteractiveWidgets] =
+    useState(true);
 
   const canSubmit = useMemo(() => {
     if (busy) return false;
@@ -200,10 +218,11 @@ function CloneConsole({ jobs, onRegister, onOpenJob }: ConsoleProps) {
         objective: objective || 'Clone fiel otimizado para conversão',
         cta,
         workspaceId: workspaceId || 'workspace-alpha',
+        simplifyInteractiveWidgets,
       };
       const response = await fetch(`${API_BASE}/pages/clone`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: authHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -327,6 +346,20 @@ function CloneConsole({ jobs, onRegister, onOpenJob }: ConsoleProps) {
                 maxLength={80}
                 disabled={busy}
               />
+            </label>
+            <label className="clone-field clone-field-checkbox">
+              <input
+                type="checkbox"
+                checked={simplifyInteractiveWidgets}
+                onChange={(event) =>
+                  setSimplifyInteractiveWidgets(event.target.checked)
+                }
+                disabled={busy}
+              />
+              <span>
+                Simplificar controles arrastáveis (réguas de altura etc.) para um
+                campo de texto editável — melhora o preview e o ZIP.
+              </span>
             </label>
           </div>
         ) : null}
@@ -603,7 +636,7 @@ function GenerateWizard({ jobs, onRegister, onOpenJob }: ConsoleProps) {
       };
       const response = await fetch(`${API_BASE}/pages/generate`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: authHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -1244,8 +1277,13 @@ function GenerateWizard({ jobs, onRegister, onOpenJob }: ConsoleProps) {
 /*  Root console shell                                                 */
 /* ----------------------------------------------------------------- */
 
-function Console() {
-  const [mode, setMode] = useState<Mode>('clone');
+interface RootConsoleProps {
+  readonly initialMode?: Mode;
+  readonly onBack?: () => void;
+}
+
+function Console({ initialMode = 'clone', onBack }: RootConsoleProps = {}) {
+  const [mode, setMode] = useState<Mode>(initialMode);
   const { jobs, register } = useJobsStream();
 
   const openJob = (jobId: string, jobMode: Mode) => {
@@ -1271,6 +1309,23 @@ function Console() {
           </span>
         </div>
         <nav className="landing-nav-links" style={{ gap: 8 }}>
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(255,255,255,0.12)',
+                color: '#cbd5e1',
+                padding: '6px 14px',
+                borderRadius: 8,
+                fontSize: 13,
+                cursor: 'pointer',
+              }}
+            >
+              ← Minhas páginas
+            </button>
+          )}
           <div
             role="tablist"
             style={{
@@ -1358,15 +1413,72 @@ function tabStyle(active: boolean): React.CSSProperties {
   };
 }
 
-function App() {
+/**
+ * Decides which top-level surface to render once the AuthContext is ready.
+ * URL params still drive `?jobLoading=` (active job) and `?pageId=` (open
+ * an existing page from the dashboard); everything else falls back to the
+ * dashboard for logged users or the auth screen for anonymous visitors.
+ */
+function AuthGate() {
+  const auth = useAuth();
+  const [view, setView] = useState<'dashboard' | 'console'>('dashboard');
+  const [consoleMode, setConsoleMode] = useState<Mode>('clone');
+
+  if (auth.status === 'loading') {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card" style={{ textAlign: 'center' }}>
+          Carregando…
+        </div>
+      </div>
+    );
+  }
+
+  if (auth.status !== 'authenticated') {
+    return <AuthScreen />;
+  }
+
+  // URL-based deep links — work both for fresh job loads and direct page
+  // edits triggered from the dashboard.
   const params = new URLSearchParams(window.location.search);
   const jobLoading = params.get('jobLoading');
+  const pageIdParam = params.get('pageId');
   const modeParam = params.get('mode');
+  const mode: Mode = modeParam === 'generate' ? 'generate' : 'clone';
+
   if (jobLoading) {
-    const mode: Mode = modeParam === 'generate' ? 'generate' : 'clone';
     return <JobLoadingScreen jobId={jobLoading} mode={mode} />;
   }
-  return <Console />;
+  if (pageIdParam) {
+    return <JobLoadingScreen pageId={pageIdParam} mode={mode} />;
+  }
+
+  if (view === 'console') {
+    return <Console initialMode={consoleMode} onBack={() => setView('dashboard')} />;
+  }
+
+  return (
+    <DashboardScreen
+      onOpenPage={(pageId, openMode) => {
+        const url = new URL(window.location.href);
+        url.searchParams.set('pageId', pageId);
+        url.searchParams.set('mode', openMode);
+        window.open(url.toString(), '_blank');
+      }}
+      onStartNew={(newMode) => {
+        setConsoleMode(newMode);
+        setView('console');
+      }}
+    />
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
+  );
 }
 
 export default App;

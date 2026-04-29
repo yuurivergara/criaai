@@ -1,6 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { API_BASE } from './apiConfig';
+import { CustomDomainsPanel } from './CustomDomainsPanel';
+import { getStoredAuthToken } from './auth/AuthContext';
+
+/**
+ * Builds Authorization headers reading the token straight from localStorage.
+ * We avoid plumbing the AuthContext through the giant JobLoadingScreen tree
+ * because the rest of the file already uses `fetch` directly with literals.
+ */
+function authHeader(extra?: HeadersInit): Record<string, string> {
+  const token = getStoredAuthToken();
+  const base: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+  if (extra instanceof Headers) {
+    extra.forEach((value, key) => {
+      base[key] = value;
+    });
+  } else if (Array.isArray(extra)) {
+    for (const [k, v] of extra) base[k] = v;
+  } else if (extra) {
+    Object.assign(base, extra);
+  }
+  return base;
+}
 import {
   IconAlert,
   IconCart,
@@ -61,6 +85,23 @@ interface EditorPage {
   html: string;
   renderMode: 'runtime' | 'frozen';
   stepId?: string;
+  thumbnail?: string;
+  /** Page came from a streaming clone.* event and isn't fully consolidated yet. */
+  capturing?: boolean;
+}
+
+interface CloneStreamingState {
+  active: boolean;
+  stage?: 'fetch' | 'crawl' | 'walk' | 'persist' | 'completed' | 'failed';
+  message?: string;
+  percent?: number;
+  /** stepId → freshly captured version awaiting user decision. */
+  conflicts: Record<
+    string,
+    { title: string; htmlSize: number; thumbnail?: string }
+  >;
+  /** Newly added page banner — auto-clears after a few seconds. */
+  toast?: { stepId: string; title: string; addedAt: number };
 }
 
 interface PublishState {
@@ -76,6 +117,11 @@ interface CustomizationAnchor {
   kind: 'checkout' | 'video';
   selector: string;
   stableId?: string;
+  /**
+   * Stable key (`checkout-<stableId>` / `video-<stableId>`) shared across steps.
+   * URLs must persist under this key when ephemeral anchor ids churn after edits.
+   */
+  groupId?: string;
   label: string;
   currentValue?: string;
   tag: string;
@@ -111,6 +157,7 @@ function extractCustomizationAnchors(meta: unknown): CustomizationAnchor[] {
         kind: c.kind,
         selector: c.selector,
         stableId: typeof c.stableId === 'string' ? c.stableId : undefined,
+        groupId: typeof c.groupId === 'string' ? c.groupId : undefined,
         label: c.label,
         tag: c.tag,
         currentValue:
@@ -172,6 +219,18 @@ function extractCustomizationValues(meta: unknown): Record<string, string> {
   return out;
 }
 
+function customizationInputValue(
+  values: Record<string, string>,
+  anchor: Pick<CustomizationAnchor, 'id' | 'groupId'>,
+): string {
+  const direct = values[anchor.id];
+  if (direct !== undefined) return direct;
+  if (anchor.groupId && values[anchor.groupId] !== undefined) {
+    return values[anchor.groupId] ?? '';
+  }
+  return '';
+}
+
 const PHRASES_CLONE: string[] = [
   'Mapeando a estrutura da página de origem…',
   'Clonando hierarquia e regiões principais…',
@@ -197,19 +256,48 @@ const PHRASES_GENERATE: string[] = [
 ];
 
 interface Props {
-  jobId: string;
+  /** When opening from a brand-new job (clone/generate flow). */
+  jobId?: string;
+  /**
+   * When re-opening an already-finished page from the dashboard. Skips the
+   * loading animation and goes straight to the editor for the given page.
+   */
+  pageId?: string;
   mode: Mode;
+  /** Optional callback when the user wants to leave the editor. */
+  onBack?: () => void;
 }
 
 const MIN_LOADING_MS = 15000;
+/**
+ * Reduced minimum for clone-streaming: as soon as the backend emits
+ * `clone.entryReady`, the editor is already usable on the entry page
+ * while the rest of the pipeline keeps streaming. 1.8s gives a smooth
+ * transition without dragging the loading animation when the entry
+ * page lands in <500ms.
+ */
+const MIN_LOADING_MS_CLONE_STREAM = 1800;
 
-export function JobLoadingScreen({ jobId, mode }: Props) {
+function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
+  // When opening directly from the dashboard there's no "loading" phase —
+  // pretend the job has already completed and skip the warm-up animation.
+  const directOpen = Boolean(pageId && !jobId);
   const phrases = mode === 'clone' ? PHRASES_CLONE : PHRASES_GENERATE;
   const [phraseIndex, setPhraseIndex] = useState(0);
-  const [job, setJob] = useState<JobRecord | null>(null);
+  const [job, setJob] = useState<JobRecord | null>(
+    directOpen
+      ? {
+          id: `direct-${pageId}`,
+          type: mode,
+          status: 'completed',
+          result: { pageId },
+          updatedAt: new Date().toISOString(),
+        }
+      : null,
+  );
   const [clock, setClock] = useState(Date.now());
-  const [startedAt] = useState(Date.now());
-  const [progress, setProgress] = useState(8);
+  const [startedAt] = useState(directOpen ? Date.now() - MIN_LOADING_MS - 1 : Date.now());
+  const [progress, setProgress] = useState(directOpen ? 100 : 8);
   const [page, setPage] = useState<PageRecord | null>(null);
   const [editorPages, setEditorPages] = useState<EditorPage[]>([]);
   const [activePageUrl, setActivePageUrl] = useState('');
@@ -249,10 +337,16 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     Record<string, string>
   >({});
   const [navigationMap, setNavigationMap] = useState<NavigationEdgeView[]>([]);
+  const [cloneStream, setCloneStream] = useState<CloneStreamingState>({
+    active: false,
+    conflicts: {},
+  });
+  const [streamingPageId, setStreamingPageId] = useState<string | null>(null);
+  const cloneStreamSocketRef = useRef<Socket | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const customizationDebounceRef = useRef<number | null>(null);
   const doneRef = useRef(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const appliedPreviewKeyRef = useRef('');
   const saveDebounceRef = useRef<number | null>(null);
   const pendingDirtyStepsRef = useRef<Set<string>>(new Set());
   const suppressAutosaveOnceRef = useRef(true);
@@ -274,10 +368,23 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
   }, [job]);
 
   const elapsedMs = Math.max(0, clock - startedAt);
-  const remainingMs = Math.max(0, MIN_LOADING_MS - elapsedMs);
+  // Streaming clones drop the loading floor from 15s to ~1.8s the
+  // moment the backend emits `clone.entryReady` (= we have a pageId
+  // and the entry page snapshot is already persisted). The editor
+  // opens immediately and the remaining work streams into the sidebar.
+  const effectiveMinLoadingMs =
+    mode === 'clone' && streamingPageId
+      ? MIN_LOADING_MS_CLONE_STREAM
+      : MIN_LOADING_MS;
+  const remainingMs = Math.max(0, effectiveMinLoadingMs - elapsedMs);
   const remainingSeconds = Math.ceil(remainingMs / 1000);
   const minReady = remainingMs === 0;
-  const showLoading = !terminal || !minReady || (terminal === 'ok' && !page && !pageError);
+  // Streaming mode opens the editor as soon as the entry page is
+  // persisted, even while job.status is still "processing".
+  const streamingReady = mode === 'clone' && streamingPageId && minReady;
+  const showLoading = streamingReady
+    ? !page && !pageError
+    : !terminal || !minReady || (terminal === 'ok' && !page && !pageError);
 
   const selectedField = useMemo(
     () => editorFields.find((field) => field.id === selectedEditorId) ?? null,
@@ -306,18 +413,22 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
   }, [editorFields, editorFilter]);
 
   useEffect(() => {
+    // Derive the bridged preview HTML from the currently active page's
+    // HTML + render mode. We deliberately don't gate this with a "last
+    // applied key" ref: when the user clicks a different step, React
+    // first commits the new `activePageUrl` (with the *previous*
+    // `editableHtml` still in state); a separate effect then loads the
+    // new step's HTML, bumping `editableHtml`. Caching by URL alone
+    // would short-circuit that second pass and leave the iframe stuck
+    // showing the previous page. `setState` already bails when the
+    // next value equals the current one, so an explicit ref is not
+    // needed and was causing exactly that "shows previous page" bug.
     if (!editableHtml || !activePageUrl) {
       setLivePreviewHtml('');
-      appliedPreviewKeyRef.current = '';
       return;
     }
-    const key = `${activePageUrl}::${effectiveRenderMode}`;
-    if (appliedPreviewKeyRef.current === key && livePreviewHtml) {
-      return;
-    }
-    appliedPreviewKeyRef.current = key;
     setLivePreviewHtml(withEditorBridge(editableHtml, effectiveRenderMode));
-  }, [editableHtml, activePageUrl, effectiveRenderMode, livePreviewHtml]);
+  }, [editableHtml, activePageUrl, effectiveRenderMode]);
 
   useEffect(() => {
     const tick = window.setInterval(() => {
@@ -348,10 +459,13 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
   }, [job?.status]);
 
   useEffect(() => {
+    if (!jobId) return;
     let cancelled = false;
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}`);
+        const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
+          headers: authHeader(),
+        });
         if (!response.ok || cancelled) {
           return;
         }
@@ -378,8 +492,18 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
   }, [jobId]);
 
   useEffect(() => {
+    if (!jobId) return;
     const endpoint = API_BASE.replace(/\/v1$/, '');
     const socket: Socket = io(`${endpoint}/jobs`, { transports: ['websocket'] });
+    cloneStreamSocketRef.current = socket;
+    let subscribedPageId: string | null = null;
+    socket.on('connect', () => {
+      // Dev/HMR and transient network drops trigger reconnects. Rejoin the
+      // room so streaming keeps flowing instead of silently stopping.
+      if (subscribedPageId) {
+        socket.emit('clone.subscribe', { pageId: subscribedPageId });
+      }
+    });
     socket.on('job.updated', (incoming: JobRecord) => {
       if (incoming.id !== jobId) {
         return;
@@ -394,22 +518,223 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
         setProgress(100);
       }
     });
+
+    type EntryReady = {
+      jobId: string;
+      pageId: string;
+      sourceUrl: string;
+      title: string;
+      entryPage: {
+        url: string;
+        title: string;
+        html: string;
+        renderMode?: 'runtime' | 'frozen';
+        stepId?: string;
+        thumbnail?: string;
+      };
+    };
+    type PageCaptured = {
+      jobId: string;
+      pageId: string;
+      page: {
+        url: string;
+        title: string;
+        html: string;
+        renderMode?: 'runtime' | 'frozen';
+        stepId?: string;
+        thumbnail?: string;
+      };
+      customizationAnchors?: unknown[];
+    };
+    type EdgeAdded = {
+      jobId: string;
+      pageId: string;
+      edge: {
+        fromStepId: string;
+        toStepId: string;
+        selector: string;
+        triggerText?: string;
+        actionId?: string;
+      };
+    };
+    type StageEvent = {
+      jobId: string;
+      pageId?: string;
+      stage:
+        | 'fetch'
+        | 'crawl'
+        | 'walk'
+        | 'persist'
+        | 'interactive'
+        | 'completed'
+        | 'failed';
+      message?: string;
+      percent?: number;
+    };
+    type ConflictEvent = {
+      jobId: string;
+      pageId: string;
+      stepId: string;
+      incoming: { title: string; htmlSize: number; thumbnail?: string };
+    };
+
+    socket.on('clone.entryReady', (event: EntryReady) => {
+      if (event.jobId !== jobId) return;
+      setStreamingPageId(event.pageId);
+      subscribedPageId = event.pageId;
+      setCloneStream((current) => ({
+        ...current,
+        active: true,
+        stage: 'crawl',
+        message: 'Página de entrada pronta — explorando o resto…',
+        percent: Math.max(current.percent ?? 0, 15),
+      }));
+      // Subscribe to the page room so subsequent clone.* events arrive.
+      socket.emit('clone.subscribe', { pageId: event.pageId });
+    });
+
+    socket.on('clone.pageCaptured', (event: PageCaptured) => {
+      if (event.jobId !== jobId) return;
+      const incoming = event.page;
+      const stepId = incoming.stepId ?? incoming.url;
+      setEditorPages((current) => {
+        const idx = current.findIndex(
+          (p) => (p.stepId ?? p.url) === stepId,
+        );
+        const next: EditorPage = {
+          url: incoming.url,
+          title: incoming.title,
+          html: incoming.html,
+          renderMode: incoming.renderMode === 'frozen' ? 'frozen' : 'runtime',
+          stepId: incoming.stepId,
+          thumbnail: incoming.thumbnail,
+          capturing: false,
+        };
+        if (idx === -1) return [...current, next];
+        const updated = [...current];
+        updated[idx] = { ...updated[idx], ...next };
+        return updated;
+      });
+      setCloneStream((current) => ({
+        ...current,
+        active:
+          current.stage !== 'interactive' && current.stage !== 'completed',
+        toast: {
+          stepId,
+          title: incoming.title,
+          addedAt: Date.now(),
+        },
+      }));
+      if (Array.isArray(event.customizationAnchors)) {
+        setCustomizationAnchors(
+          extractCustomizationAnchors({
+            customizationAnchors: event.customizationAnchors,
+          }),
+        );
+      }
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      toastTimerRef.current = window.setTimeout(() => {
+        setCloneStream((current) => ({ ...current, toast: undefined }));
+      }, 2800);
+    });
+
+    socket.on('clone.edgeAdded', (event: EdgeAdded) => {
+      if (event.jobId !== jobId) return;
+      setNavigationMap((current) => {
+        const exists = current.some(
+          (e) =>
+            e.fromStepId === event.edge.fromStepId &&
+            e.toStepId === event.edge.toStepId &&
+            e.selector === event.edge.selector,
+        );
+        if (exists) return current;
+        return [
+          ...current,
+          {
+            fromStepId: event.edge.fromStepId,
+            toStepId: event.edge.toStepId,
+            selector: event.edge.selector,
+            triggerText: event.edge.triggerText,
+            actionId: event.edge.actionId,
+          },
+        ];
+      });
+    });
+
+    socket.on('clone.stage', (event: StageEvent) => {
+      if (event.jobId !== jobId) return;
+      const bannerOff =
+        event.stage === 'completed' ||
+        event.stage === 'failed' ||
+        event.stage === 'interactive';
+      setCloneStream((current) => ({
+        ...current,
+        active: !bannerOff,
+        stage: event.stage,
+        message: event.message,
+        percent:
+          typeof event.percent === 'number'
+            ? Math.max(current.percent ?? 0, event.percent)
+            : current.percent,
+      }));
+    });
+
+    socket.on('clone.conflictDetected', (event: ConflictEvent) => {
+      if (event.jobId !== jobId) return;
+      setCloneStream((current) => ({
+        ...current,
+        conflicts: {
+          ...current.conflicts,
+          [event.stepId]: event.incoming,
+        },
+      }));
+    });
+
+    socket.on('clone.completed', (event: StageEvent) => {
+      if (event.jobId !== jobId) return;
+      setCloneStream((current) => ({
+        ...current,
+        active: false,
+        stage: 'completed',
+        percent: event.percent ?? 100,
+        message: event.message,
+      }));
+    });
+
     return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+      cloneStreamSocketRef.current = null;
       socket.disconnect();
     };
   }, [jobId]);
 
   useEffect(() => {
-    if (terminal !== 'ok' || !minReady || page || pageError) {
+    if (page || pageError || !minReady) {
       return;
     }
-    const pageId = job?.result?.pageId;
-    if (!pageId) {
-      setPageError('A missão finalizou sem pageId para abrir o editor.');
+    const streamingId = streamingPageId;
+    const finishedId = job?.result?.pageId;
+    // Streaming: open the editor with the entry page as soon as we
+    // have a streamingPageId (well before the job is "completed").
+    // Non-streaming fallback keeps the original behaviour: wait for
+    // terminal=ok and pageId in job.result.
+    const pageIdToLoad =
+      streamingId ?? (terminal === 'ok' ? finishedId : null);
+    if (!pageIdToLoad) {
+      if (terminal === 'ok' && !finishedId) {
+        setPageError('A missão finalizou sem pageId para abrir o editor.');
+      }
       return;
     }
     const loadPage = async () => {
-      const response = await fetch(`${API_BASE}/pages/${pageId}`);
+      const response = await fetch(`${API_BASE}/pages/${pageIdToLoad}`, {
+        headers: authHeader(),
+      });
       if (!response.ok) {
         throw new Error('Não foi possível carregar a página clonada.');
       }
@@ -418,7 +743,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     loadPage().catch((error: unknown) => {
       setPageError(error instanceof Error ? error.message : 'Falha ao carregar a página.');
     });
-  }, [job, minReady, page, pageError, terminal]);
+  }, [job, minReady, page, pageError, terminal, streamingPageId]);
 
   // When the generate job finishes, the backend already auto-publishes the
   // page. Reflect that in publishState so the header CTA shows "Republicar"
@@ -513,7 +838,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
           }
           const res = await fetch(`${API_BASE}/pages/${page.id}/content`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeader({ 'Content-Type': 'application/json' }),
             body: JSON.stringify(body),
           });
           if (!res.ok) {
@@ -553,7 +878,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     try {
       const res = await fetch(`${API_BASE}/pages/${page.id}/publish`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeader({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ subdomain }),
       });
       if (!res.ok) {
@@ -571,7 +896,9 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
           });
           return;
         }
-        const jobRes = await fetch(`${API_BASE}/jobs/${data.jobId}`);
+        const jobRes = await fetch(`${API_BASE}/jobs/${data.jobId}`, {
+          headers: authHeader(),
+        });
         const job = (await jobRes.json()) as {
           status?: string;
           result?: { publicUrl?: string };
@@ -621,7 +948,10 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             stableId: a.stableId,
             behavior: a.behavior,
             label: a.label,
-            value: values[a.id] ?? '',
+            value:
+              values[a.id]?.trim() ||
+              (a.groupId ? values[a.groupId] : '')?.trim() ||
+              '',
           })),
         },
         '*',
@@ -717,9 +1047,57 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     editorPages,
   ]);
 
+  /**
+   * Accept or reject a clone-vs-edit conflict for a specific step.
+   * Backend swaps the HTML (accept) or drops the pending capture
+   * (reject), then we re-fetch the page so the editor sees the
+   * resolution. Always clears the conflict locally so the banner
+   * disappears even if the network call is slow.
+   */
+  const handleResolveConflict = useCallback(
+    async (stepId: string, decision: 'accept' | 'reject') => {
+      if (!page?.id) return;
+      setCloneStream((current) => {
+        const nextConflicts = { ...current.conflicts };
+        delete nextConflicts[stepId];
+        return { ...current, conflicts: nextConflicts };
+      });
+      try {
+        const res = await fetch(
+          `${API_BASE}/pages/${page.id}/conflicts/${encodeURIComponent(
+            stepId,
+          )}/${decision}`,
+          {
+            method: 'POST',
+            headers: authHeader({ 'Content-Type': 'application/json' }),
+          },
+        );
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        if (decision === 'accept') {
+          // Pull the fresh meta so editorPages picks up the swapped HTML.
+          const refreshed = await fetch(`${API_BASE}/pages/${page.id}`, {
+            headers: authHeader(),
+          });
+          if (refreshed.ok) {
+            setPage((await refreshed.json()) as PageRecord);
+          }
+        }
+      } catch (err) {
+        console.warn('[clone] resolve conflict failed', err);
+      }
+    },
+    [page?.id],
+  );
+
   const handleCustomizationChange = useCallback(
-    (anchorId: string, value: string) => {
-      setCustomizationValues((current) => ({ ...current, [anchorId]: value }));
+    (anchorId: string, groupId: string | undefined, value: string) => {
+      setCustomizationValues((current) => ({
+        ...current,
+        [anchorId]: value,
+        ...(groupId ? { [groupId]: value } : {}),
+      }));
       if (customizationDebounceRef.current) {
         window.clearTimeout(customizationDebounceRef.current);
       }
@@ -732,9 +1110,12 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
               `${API_BASE}/pages/${page.id}/content`,
               {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeader({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify({
-                  customizationValues: { [anchorId]: value },
+                  customizationValues: {
+                    [anchorId]: value,
+                    ...(groupId ? { [groupId]: value } : {}),
+                  },
                 }),
               },
             );
@@ -777,7 +1158,11 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
   const pendingCustomizations = useMemo(
     () =>
       customizationAnchors.filter(
-        (a) => !customizationValues[a.id]?.trim(),
+        (a) =>
+          !(
+            customizationValues[a.id]?.trim() ||
+            (a.groupId && customizationValues[a.groupId]?.trim())
+          ),
       ).length,
     [customizationAnchors, customizationValues],
   );
@@ -788,7 +1173,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
     try {
       const res = await fetch(
         `${API_BASE}/pages/${page.id}/export.zip`,
-        { method: 'GET' },
+        { method: 'GET', headers: authHeader() },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
@@ -928,7 +1313,11 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
           <p className="job-loading-kicker">{kicker}</p>
           <h1 className="job-loading-title">{title}</h1>
           <p className="job-loading-sub">
-            Preparando editor da missão. Tempo mínimo de loading: 15 segundos.
+            {mode === 'clone' && streamingPageId
+              ? 'Snapshot pronto — abrindo editor.'
+              : `Preparando editor da missão. Tempo mínimo: ${Math.round(
+                  effectiveMinLoadingMs / 1000,
+                )}s.`}
           </p>
           <div className="job-loading-phrase">
             <p key={phraseIndex}>{phrases[phraseIndex]}</p>
@@ -962,13 +1351,23 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
           <div className="job-loading-status err">{pageError}</div>
         </div>
       ) : (
-        <section className={`editor-shell device-${device}${previewMode ? ' is-preview' : ''}`}>
+        <section
+          className={`editor-shell device-${device}${
+            previewMode ? ' is-preview' : ''
+          }${cloneStream.active ? ' is-streaming' : ''}`}
+        >
           <header className="editor-topbar">
             <div className="editor-topbar-left">
               <a
                 className="editor-brand"
                 href={window.location.pathname}
                 title="Voltar ao console"
+                onClick={(e) => {
+                  if (onBack) {
+                    e.preventDefault();
+                    onBack();
+                  }
+                }}
               >
                 <span className="editor-brand-mark">C</span>
                 <span className="editor-brand-text">CriaAI</span>
@@ -1104,6 +1503,50 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             </div>
           </header>
 
+          {cloneStream.active && (
+            <div
+              className="editor-stream-banner"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="editor-stream-pulse" aria-hidden="true" />
+              <span className="editor-stream-message">
+                {cloneStream.message ?? 'Clonando em segundo plano…'}
+              </span>
+              {typeof cloneStream.percent === 'number' && (
+                <span className="editor-stream-percent">
+                  {Math.round(cloneStream.percent)}%
+                </span>
+              )}
+            </div>
+          )}
+
+          {cloneStream.toast && (
+            <div className="editor-stream-toast" role="status">
+              <span className="editor-stream-toast-icon">＋</span>
+              <span className="editor-stream-toast-meta">
+                <strong>Nova página capturada</strong>
+                <span>{cloneStream.toast.title || cloneStream.toast.stepId}</span>
+              </span>
+              <button
+                type="button"
+                className="editor-stream-toast-action"
+                onClick={() => {
+                  const target = editorPages.find(
+                    (p) => (p.stepId ?? p.url) === cloneStream.toast?.stepId,
+                  );
+                  if (target) setActivePageUrl(target.url);
+                  setCloneStream((current) => ({
+                    ...current,
+                    toast: undefined,
+                  }));
+                }}
+              >
+                Abrir
+              </button>
+            </div>
+          )}
+
           <div className="editor-body">
             <aside className="editor-sidebar">
               <div className="editor-sidebar-head">
@@ -1119,22 +1562,40 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                     (a) => a.stepId === itemStepId,
                   );
                   const pendingForItem = itemAnchors.filter(
-                    (a) => !customizationValues[a.id]?.trim(),
+                    (a) =>
+                      !(
+                        customizationValues[a.id]?.trim() ||
+                        (a.groupId && customizationValues[a.groupId]?.trim())
+                      ),
                   ).length;
-                  const isQuiz = itemStepId.startsWith('v');
+                  const isQuiz =
+                    itemStepId.startsWith('v') || itemStepId.startsWith('q');
                   const isActive = item.url === activePageUrl;
+                  const hasConflict = Boolean(
+                    cloneStream.conflicts[itemStepId],
+                  );
                   return (
                     <button
                       key={item.url}
                       type="button"
                       className={`editor-page-item${
                         isActive ? ' active' : ''
+                      }${item.capturing ? ' is-capturing' : ''}${
+                        hasConflict ? ' has-conflict' : ''
                       }`}
                       onClick={() => setActivePageUrl(item.url)}
                     >
-                      <span className="editor-page-icon">
-                        {isQuiz ? <IconQuiz /> : <IconPage />}
-                      </span>
+                      {item.thumbnail ? (
+                        <span
+                          className="editor-page-thumb"
+                          aria-hidden="true"
+                          style={{ backgroundImage: `url(${item.thumbnail})` }}
+                        />
+                      ) : (
+                        <span className="editor-page-icon">
+                          {isQuiz ? <IconQuiz /> : <IconPage />}
+                        </span>
+                      )}
                       <span className="editor-page-meta">
                         <span className="editor-page-title">
                           {itemStepId === 'main'
@@ -1147,7 +1608,15 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                             : item.title || `Step ${index + 1}`}
                         </span>
                       </span>
-                      {pendingForItem > 0 && (
+                      {hasConflict && (
+                        <span
+                          className="editor-page-conflict"
+                          title="Versão nova capturada — clique para revisar"
+                        >
+                          !
+                        </span>
+                      )}
+                      {pendingForItem > 0 && !hasConflict && (
                         <span
                           className="editor-page-badge"
                           title={`${pendingForItem} customização(ões) pendente(s)`}
@@ -1158,32 +1627,29 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                     </button>
                   );
                 })}
+                {cloneStream.active && (
+                  <div className="editor-page-skeleton" aria-hidden="true">
+                    <span className="editor-page-shimmer" />
+                    <span className="editor-page-meta">
+                      <span className="editor-page-title">Capturando…</span>
+                      <span className="editor-page-sub">
+                        {cloneStream.message ?? 'Explorando navegação'}
+                      </span>
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="editor-sidebar-foot">
                 <div className="editor-render-mode">
-                  <label>Render</label>
+                  <label>Modo</label>
                   <div className="editor-render-toggle">
                     <button
                       type="button"
                       className={
-                        effectiveRenderMode === 'runtime' ? 'active' : ''
-                      }
-                      onClick={() => {
-                        if (!activePageUrl) return;
-                        setPageRenderModeOverrides((current) => ({
-                          ...current,
-                          [activePageUrl]: 'runtime',
-                        }));
-                      }}
-                      title="Mantém scripts originais (maior fidelidade)"
-                    >
-                      Runtime
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        effectiveRenderMode === 'frozen' ? 'active' : ''
+                        effectiveRenderMode === 'frozen' && !previewMode
+                          ? 'active'
+                          : ''
                       }
                       onClick={() => {
                         if (!activePageUrl) return;
@@ -1191,10 +1657,30 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                           ...current,
                           [activePageUrl]: 'frozen',
                         }));
+                        setPreviewMode(false);
                       }}
-                      title="Remove scripts (mais estável pra edição)"
+                      title="Modo de edição estável"
                     >
-                      Frozen
+                      Edição
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        effectiveRenderMode === 'runtime' && previewMode
+                          ? 'active'
+                          : ''
+                      }
+                      onClick={() => {
+                        if (!activePageUrl) return;
+                        setPageRenderModeOverrides((current) => ({
+                          ...current,
+                          [activePageUrl]: 'runtime',
+                        }));
+                        setPreviewMode(true);
+                      }}
+                      title="Preview navegável do quiz"
+                    >
+                      Preview
                     </button>
                   </div>
                 </div>
@@ -1219,9 +1705,16 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                       title="Cloned page editor"
                       srcDoc={livePreviewHtml}
                       sandbox={
-                        effectiveRenderMode === 'frozen'
-                          ? 'allow-scripts allow-forms allow-modals allow-popups allow-downloads'
-                          : 'allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads allow-top-navigation-by-user-activation'
+                        // We always include `allow-same-origin` now: the
+                        // original site scripts (sliders, toggles, custom
+                        // selects, weight pickers) need access to their
+                        // own globals, localStorage, and to query their
+                        // bundled CSS/asset URLs. Without this, every
+                        // hydrated component crashes the moment it tries
+                        // to read `document.cookie` or open an IDB.
+                        // The navigation guard injected at the top of
+                        // <head> is what keeps the iframe from escaping.
+                        'allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads'
                       }
                     />
                   ) : (
@@ -1264,6 +1757,41 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
 
               {inspectorTab === 'content' && (
                 <div className="editor-inspector-body">
+                  {cloneStream.conflicts[activeStepId] && (
+                    <div className="editor-conflict-card">
+                      <div className="editor-conflict-head">
+                        <IconAlert />
+                        <div>
+                          <strong>Versão nova disponível</strong>
+                          <p>
+                            O clone re-capturou esta página enquanto você
+                            estava editando. Você quer manter sua edição ou
+                            substituir pela nova captura?
+                          </p>
+                        </div>
+                      </div>
+                      <div className="editor-conflict-actions">
+                        <button
+                          type="button"
+                          className="editor-btn editor-btn-ghost"
+                          onClick={() =>
+                            handleResolveConflict(activeStepId, 'reject')
+                          }
+                        >
+                          Manter minha edição
+                        </button>
+                        <button
+                          type="button"
+                          className="editor-btn editor-btn-primary"
+                          onClick={() =>
+                            handleResolveConflict(activeStepId, 'accept')
+                          }
+                        >
+                          Usar nova captura
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {selectedField ? (
                     <>
                       <div className="editor-inspector-header">
@@ -1427,10 +1955,14 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                                 <input
                                   type="url"
                                   placeholder="https://pay.suamarca.com/..."
-                                  value={customizationValues[anchor.id] ?? ''}
+                                  value={customizationInputValue(
+                                    customizationValues,
+                                    anchor,
+                                  )}
                                   onChange={(e) =>
                                     handleCustomizationChange(
                                       anchor.id,
+                                      anchor.groupId,
                                       e.target.value,
                                     )
                                   }
@@ -1477,10 +2009,14 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                                 <input
                                   type="url"
                                   placeholder="https://player.vimeo.com/video/..."
-                                  value={customizationValues[anchor.id] ?? ''}
+                                  value={customizationInputValue(
+                                    customizationValues,
+                                    anchor,
+                                  )}
                                   onChange={(e) =>
                                     handleCustomizationChange(
                                       anchor.id,
+                                      anchor.groupId,
                                       e.target.value,
                                     )
                                   }
@@ -1496,7 +2032,7 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
             </aside>
           </div>
 
-          {publishModalOpen && (
+          {publishModalOpen && page && (
             <div
               className="editor-modal-backdrop"
               onClick={() => setPublishModalOpen(false)}
@@ -1583,6 +2119,10 @@ export function JobLoadingScreen({ jobId, mode }: Props) {
                         </div>
                       </div>
                     )}
+                  <CustomDomainsPanel
+                    pageId={page.id}
+                    isPublished={publishState.status === 'done'}
+                  />
                 </div>
                 <div className="editor-modal-foot">
                   <button
@@ -1638,6 +2178,7 @@ function extractPublicPagesFromMeta(meta: unknown): EditorPage[] {
         html?: unknown;
         renderMode?: unknown;
         stepId?: unknown;
+        thumbnail?: unknown;
       };
       if (
         typeof candidate.url !== 'string' ||
@@ -1654,6 +2195,10 @@ function extractPublicPagesFromMeta(meta: unknown): EditorPage[] {
           candidate.renderMode === 'frozen' ? 'frozen' : 'runtime',
         stepId:
           typeof candidate.stepId === 'string' ? candidate.stepId : undefined,
+        thumbnail:
+          typeof candidate.thumbnail === 'string'
+            ? candidate.thumbnail
+            : undefined,
       };
     })
     .filter((item): item is EditorPage => item !== null);
@@ -1790,7 +2335,122 @@ const EDITOR_BRIDGE_CSS = `
   }
   html[data-criaai-mode="preview"] [data-criaai-nav-chip] { display: none !important; }
   html[data-criaai-mode="preview"] [data-criaai-nav] { outline: none !important; }
+  /* OPTION SELECTION FEEDBACK — strong, high-priority.
+     Kept high-specificity so it wins over most theme styles. The user
+     reported that subtle rings were invisible and people thought the
+     widget was broken. We now show a thick filled border + tinted
+     background so the selection is unmistakable. */
+  html [data-criaai-checked] {
+    outline: 3px solid rgba(124, 92, 255, 0.95) !important;
+    outline-offset: -3px !important;
+    background-image: linear-gradient(
+      rgba(124, 92, 255, 0.10),
+      rgba(124, 92, 255, 0.10)
+    ) !important;
+    background-blend-mode: multiply !important;
+    border-radius: inherit;
+    transition: outline-color 80ms ease, background-color 80ms ease !important;
+    position: relative;
+  }
+  /* Checkmark badge in the corner so multi-select is visually obvious
+     even on cards that don't have a native checkbox icon. */
+  html [data-criaai-checked]::after {
+    content: "" !important;
+    position: absolute !important;
+    top: 8px !important;
+    right: 8px !important;
+    width: 22px !important;
+    height: 22px !important;
+    border-radius: 50% !important;
+    background: #7c5cff
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>")
+      center / 14px no-repeat !important;
+    box-shadow: 0 2px 8px rgba(124, 92, 255, 0.6) !important;
+    pointer-events: none !important;
+    z-index: 2147483647 !important;
+  }
+  /* Press feedback — instant when the finger goes down, before the
+     click event even fires. Visually answers "did it register?". */
+  html [data-criaai-pressed] {
+    transform: scale(0.97) !important;
+    transition: transform 80ms ease !important;
+  }
+  /* Toggle button group fallback (kg/lb, masculino/feminino, etc.).
+     Same strong outline as checked options. */
+  html [data-criaai-active]:not([data-criaai-checked]) {
+    outline: 3px solid rgba(124, 92, 255, 0.95) !important;
+    outline-offset: -3px !important;
+    background-image: linear-gradient(
+      rgba(124, 92, 255, 0.10),
+      rgba(124, 92, 255, 0.10)
+    ) !important;
+  }
+  /* Forcibly unlock CTAs the shim says should be enabled — beats the
+     original site's disabled-button styles. */
+  html [data-criaai-cta-unlocked] {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    cursor: pointer !important;
+    filter: none !important;
+  }
+  html [data-criaai-cta-unlocked][disabled] { /* belt + suspenders */
+    pointer-events: auto !important;
+  }
 `;
+
+// Runs FIRST in the iframe (injected at the top of <head>). Wraps every
+// navigation primitive so the original SPA's redirects can't kick the
+// editor out to the live URL. We also block <form> submissions globally
+// because most clones still carry the original `action="https://…"`.
+const NAVIGATION_GUARD_JS = `(() => {
+  try {
+    var noop = function () {};
+    var blocked = function (api) {
+      try { console.warn('[criaai] blocked navigation via', api); } catch (_) {}
+    };
+    // window.location.* / window.location = "…"
+    var replaceLoc = function () {
+      try {
+        var orig = window.location;
+        var stub = {
+          href: orig.href,
+          assign: function () { blocked('location.assign'); },
+          replace: function () { blocked('location.replace'); },
+          reload: noop,
+          toString: function () { return orig.href; },
+        };
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          get: function () { return stub; },
+          set: function () { blocked('location ='); },
+        });
+      } catch (_) { /* some sandboxes refuse this — fall back to handlers below */ }
+    };
+    replaceLoc();
+    // window.open should not pop new tabs to original site during preview.
+    try {
+      var origOpen = window.open;
+      window.open = function () { blocked('window.open'); return null; };
+      window.__criaaiOpen = origOpen;
+    } catch (_) {}
+    // IMPORTANT: don't install beforeunload prompts inside the iframe.
+    // Quizzes frequently register their own unsaved-change handlers and that
+    // creates the "Sair do site?" modal on every internal step transition.
+    // We already block unsafe navigations via location/open/form guards above.
+    // Block <form action> submits to external hosts.
+    document.addEventListener('submit', function (e) {
+      try {
+        var form = e.target;
+        if (!form || form.tagName !== 'FORM') return;
+        var action = form.getAttribute('action') || '';
+        if (action && /^(https?:|\\/\\/)/i.test(action)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      } catch (_) {}
+    }, true);
+  } catch (_) { /* never throw out of the guard */ }
+})();`;
 
 const EDITOR_BRIDGE_JS = `(() => {
   const MEDIA_TAGS = new Set(['IMG','VIDEO','IFRAME','AUDIO','SOURCE','PICTURE']);
@@ -1829,12 +2489,95 @@ const EDITOR_BRIDGE_JS = `(() => {
     return null;
   };
   const findEditable = (start) => {
+    // Hard rule: NEVER hijack clicks on anything that the user expects
+    // to behave like the original site — form controls, sliders, custom
+    // toggles, drag handles, tabs, menus, range pickers, calendar cells,
+    // unit switchers, etc. Clones break the moment we preventDefault() on
+    // these because the original JS handlers (which we now keep) need to
+    // see the click first. Editing those elements happens by clicking
+    // their labels/text, not the control itself.
+    if (start && start.closest) {
+      const interactive = start.closest([
+        'input',
+        'select',
+        'textarea',
+        'option',
+        'button',
+        'summary',
+        '[role="button"]',
+        '[role="checkbox"]',
+        '[role="radio"]',
+        '[role="switch"]',
+        '[role="slider"]',
+        '[role="spinbutton"]',
+        '[role="tab"]',
+        '[role="menuitem"]',
+        '[role="menuitemcheckbox"]',
+        '[role="menuitemradio"]',
+        '[role="option"]',
+        '[role="combobox"]',
+        '[role="listbox"]',
+        '[role="treeitem"]',
+        '[draggable="true"]',
+        '[data-criaai-nav]',
+        '[data-criaai-wrap]',
+      ].join(','));
+      if (interactive) return null;
+      // Labels that drive an input/select also must stay live.
+      const labelForControl = start.closest('label');
+      if (labelForControl) {
+        const wrapped = labelForControl.querySelector(
+          'input, select, textarea'
+        );
+        const forId = labelForControl.getAttribute('for');
+        const forTarget = forId ? document.getElementById(forId) : null;
+        if (wrapped || forTarget) return null;
+      }
+      // Class-based heuristic: many sites expose sliders/toggles as
+      // plain divs with a class name that says exactly what they are.
+      const classy = start.closest(
+        '[class*="slider" i], [class*="range" i], [class*="toggle" i], [class*="switch" i], [class*="tab-" i], [class*="-tab" i], [class*="thumb" i], [class*="track" i], [class*="ruler" i], [class*="altura" i], [class*="height" i], [class*="gauge" i], [class*="drag" i], [class*="knob" i]'
+      );
+      if (classy) return null;
+      // Quiz option rows often wrap copy in <span>/<p> that received
+      // data-editor-id — hijacking those clicks turns cards into text fields
+      // and breaks SPA navigation / radio toggles.
+      const quizOptionSurface = start.closest(
+        [
+          '[class*="option-theme" i]',
+          '[class*="option-background" i]',
+          '[class*="option-card" i]',
+          '[class*="quiz-option" i]',
+          '[data-option-index]',
+          '[data-choice-index]',
+          'button[class*="option-" i]',
+        ].join(','),
+      );
+      if (quizOptionSurface) return null;
+    }
     let node = start;
     while (node && node !== document.body && node.nodeType === 1) {
       if (node.dataset && node.dataset.editorId) return node;
       node = node.parentElement;
     }
     return null;
+  };
+  // Sliders/rulers are often wrapped in plain <a href="…"> for analytics.
+  // Blocking mousedown/click on those anchors breaks drag gestures — detect
+  // interactive surfaces and let them bubble to the site's JS untouched.
+  const INTERACTIVE_SURFACE_SELECTOR =
+    'input,textarea,select,button,canvas,svg,[role="slider"],[role="scrollbar"],[role="spinbutton"],[draggable="true"],[class*="slider" i],[class*="ruler" i],[class*="range" i],[class*="thumb" i],[class*="track" i],[class*="drag" i],[class*="knob" i],[class*="altura" i],[class*="height" i],[class*="gauge" i],[class*="measure" i],[class*="scale" i],[class*="picker" i],[class*="wheel" i]';
+  /** Matches draggable rulers AND quiz option cards wrapped in <a> — both must bypass anchor suppression in preview. */
+  const INTERACTIVE_SURFACE_COMBINED =
+    INTERACTIVE_SURFACE_SELECTOR +
+    ',[class*="option-theme" i],[class*="option-background" i],[class*="option-card" i],[class*="quiz-option" i],[data-option-index],[data-choice-index],button[class*="option-" i],[role="radio"],[role="option"]';
+  const interactiveSurfaceFromEvent = (ev) => {
+    const raw = ev.target;
+    const el =
+      raw && raw.nodeType === 1
+        ? raw
+        : raw && raw.parentElement;
+    return !!(el && el.closest && el.closest(INTERACTIVE_SURFACE_COMBINED));
   };
   let selected = null;
   const deselect = () => {
@@ -1861,7 +2604,39 @@ const EDITOR_BRIDGE_JS = `(() => {
     } catch (_) { /* noop */ }
   };
   document.addEventListener('click', (event) => {
-    if (editorMode === 'preview') return;
+    // PREVIEW MODE — simulate the real quiz navigation by intercepting
+    // clicks on elements that carry our data-criaai-nav marker (set by
+    // markNavigation, derived from navigationMap edges) and forwarding to
+    // the parent so it can swap the active step in the editor frame.
+    if (editorMode === 'preview') {
+      const navTarget = event.target && event.target.closest && event.target.closest('[data-criaai-nav], [data-criaai-wrap], [data-target-step]');
+      if (navTarget) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+        const stepId =
+          navTarget.getAttribute('data-target-step') ||
+          navTarget.getAttribute('data-criaai-nav') ||
+          navTarget.getAttribute('data-criaai-wrap') ||
+          '';
+        if (stepId) {
+          try { window.parent.postMessage({ type: 'editor.navigateTo', stepId: stepId }, '*'); } catch (_) {}
+        }
+        return;
+      }
+      // External anchors with no nav marker (e.g. checkout CTAs in
+      // preview): block them so the editor doesn't navigate away.
+      const externalAnchor = event.target && event.target.closest && event.target.closest('a[href]');
+      if (
+        externalAnchor &&
+        !externalAnchor.closest('[data-criaai-nav], [data-criaai-wrap]') &&
+        !interactiveSurfaceFromEvent(event)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
     const chip = event.target && event.target.closest && event.target.closest('[data-criaai-nav-chip]');
     if (chip) {
       event.preventDefault();
@@ -1879,13 +2654,31 @@ const EDITOR_BRIDGE_JS = `(() => {
     select(target);
   }, true);
   document.addEventListener('mousedown', (event) => {
-    if (editorMode === 'preview') return;
+    if (editorMode === 'preview') {
+      // Allow nav-marked elements; block other anchors (but not drag/slider UI).
+      const anchor = event.target && event.target.closest && event.target.closest('a[href]');
+      if (
+        anchor &&
+        !anchor.closest('[data-criaai-nav], [data-criaai-wrap]') &&
+        !interactiveSurfaceFromEvent(event)
+      ) {
+        event.preventDefault();
+      }
+      return;
+    }
     const anchor = event.target && event.target.closest && event.target.closest('a[href]');
-    if (anchor) { event.preventDefault(); }
+    if (anchor && !interactiveSurfaceFromEvent(event)) {
+      event.preventDefault();
+    }
   }, true);
   document.addEventListener('submit', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+    // Edit mode: prevent all submits (text being edited would be lost).
+    // Preview mode: let the form go through — the NAVIGATION_GUARD shim
+    // in the iframe head already blocks cross-origin form actions.
+    if (editorMode === 'edit') {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   }, true);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { deselect(); }
@@ -1930,7 +2723,8 @@ const EDITOR_BRIDGE_JS = `(() => {
           const label = String(item.label || '').slice(0, 32);
           const stepId = String(item.stepId || '');
           const trigger = String(item.triggerText || '');
-          el.setAttribute('data-criaai-nav', '\u2192 ' + label);
+          el.setAttribute('data-criaai-nav', stepId);
+          el.setAttribute('data-criaai-nav-label', '\u2192 ' + label);
           const cs = (el.ownerDocument || document).defaultView.getComputedStyle(el);
           if (cs && cs.position === 'static') {
             el.style.position = 'relative';
@@ -2047,6 +2841,354 @@ const EDITOR_BRIDGE_JS = `(() => {
       try { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) { /* noop */ }
     }
   });
+  // ----------------------------------------------------------------
+  // SELECTION FEEDBACK SHIM
+  // ----------------------------------------------------------------
+  // Mirrors checkbox/radio/select state into ARIA + data attributes so the
+  // selected state is visible even after we strip the original SPA scripts
+  // (frozen quiz snapshots). Three layers of coverage:
+  //   1) input[type=radio|checkbox]: native change event → propagate
+  //      aria-checked + data-criaai-checked to the input AND to the
+  //      associated <label> (for=, parent, or wrapper).
+  //   2) [role=radio|checkbox|option|switch]: click → toggle aria-checked
+  //      on the element (and clear siblings for single-select roles).
+  //   3) CSS already in EDITOR_BRIDGE_CSS provides a gentle fallback
+  //      outline so the user always sees that something happened, even
+  //      when the original stylesheet's checked-state rules were tied to
+  //      a class the SPA never injected.
+  const findRelatedLabel = (input) => {
+    if (!input) return null;
+    const id = input.id;
+    if (id) {
+      try {
+        var direct = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+        if (direct) return direct;
+      } catch (_) { /* noop */ }
+    }
+    var parentLabel = input.closest && input.closest('label');
+    if (parentLabel) return parentLabel;
+    return null;
+  };
+  const setChecked = (el, checked) => {
+    if (!el) return;
+    if (checked) {
+      el.setAttribute('aria-checked', 'true');
+      el.setAttribute('data-criaai-checked', '');
+    } else {
+      el.setAttribute('aria-checked', 'false');
+      el.removeAttribute('data-criaai-checked');
+    }
+  };
+  document.addEventListener('change', (event) => {
+    const input = event.target;
+    if (!input || (input.tagName !== 'INPUT' && input.tagName !== 'SELECT')) return;
+    const type = (input.getAttribute('type') || '').toLowerCase();
+    if (input.tagName === 'INPUT' && type !== 'radio' && type !== 'checkbox') return;
+    if (input.tagName === 'INPUT') {
+      const label = findRelatedLabel(input);
+      setChecked(input, !!input.checked);
+      setChecked(label, !!input.checked);
+      if (type === 'radio' && input.name) {
+        try {
+          const group = document.getElementsByName(input.name);
+          for (var i = 0; i < group.length; i += 1) {
+            const peer = group[i];
+            if (peer === input) continue;
+            setChecked(peer, false);
+            setChecked(findRelatedLabel(peer), false);
+          }
+        } catch (_) { /* noop */ }
+      }
+    }
+  }, true);
+  document.addEventListener('click', (event) => {
+    if (editorMode === 'edit') return;
+    const candidate = event.target && event.target.closest && event.target.closest(
+      '[role="radio"], [role="checkbox"], [role="option"], [role="switch"], [role="menuitemcheckbox"], [role="menuitemradio"]'
+    );
+    if (!candidate) return;
+    if (candidate.querySelector && candidate.querySelector('input[type="radio"], input[type="checkbox"]')) {
+      // Native input inside — let the change handler do its job.
+      return;
+    }
+    const role = candidate.getAttribute('role');
+    const isMulti = role === 'checkbox' || role === 'menuitemcheckbox' || role === 'switch';
+    const wasChecked = candidate.getAttribute('aria-checked') === 'true' ||
+      candidate.hasAttribute('data-criaai-checked');
+    if (isMulti) {
+      setChecked(candidate, !wasChecked);
+    } else {
+      // Single-select within nearest [role=radiogroup] / parent group.
+      const group = candidate.closest('[role="radiogroup"], [role="listbox"], [role="menu"]') ||
+        candidate.parentElement;
+      if (group) {
+        try {
+          group.querySelectorAll('[aria-checked="true"], [data-criaai-checked]').forEach((peer) => {
+            if (peer !== candidate) setChecked(peer, false);
+          });
+        } catch (_) { /* noop */ }
+      }
+      setChecked(candidate, true);
+    }
+  }, false);
+  // ----------------------------------------------------------------
+  // INTERACTIVITY FALLBACK SHIM
+  // ----------------------------------------------------------------
+  // The original site's JS is preserved AND inlined on capture, but
+  // some bundles (especially Next.js dynamic imports, scripts that fail
+  // CORS/CORP, scripts that crash on a foreign origin) might still fail
+  // to bootstrap inside the iframe sandbox. These shims provide a
+  // safety net so the most common quiz interactions still work even
+  // when the upstream JS is partially broken:
+  //
+  //   A) "Continuar" / "Próximo" / "Avançar" buttons that ship with
+  //      \`disabled=true\` and rely on JS to enable them after the user
+  //      selects an option. We watch for any selection state change and
+  //      remove disabled from CTA-looking buttons in scope.
+  //
+  //   B) Generic button-group toggles (kg/lb, masculino/feminino, etc.):
+  //      mirror clicks into a \`data-criaai-active\` attribute we can
+  //      style as a visual fallback when the original JS didn't react.
+  //
+  //   C) Window error logging — surface bootstrap failures to the host
+  //      console so we can debug what's failing.
+  // ----------------------------------------------------------------
+  try {
+    window.addEventListener('error', (e) => {
+      try {
+        console.warn(
+          '[criaai] iframe script error:',
+          (e && (e.message || e.error)) || e,
+          (e && e.filename) ? ('@ ' + e.filename + ':' + e.lineno) : ''
+        );
+      } catch (_) {}
+    }, true);
+    window.addEventListener('unhandledrejection', (e) => {
+      try { console.warn('[criaai] iframe unhandled:', e && (e.reason || e)); } catch (_) {}
+    }, true);
+  } catch (_) {}
+
+  const CTA_TEXT_RE = /^\\s*(?:continuar|continue|pr[oó]ximo|avan[çc]ar|next|seguinte|come[çc]ar|prosseguir|enviar|finalizar|confirmar)\\b/i;
+  const isCtaButton = (el) => {
+    if (!el) return false;
+    var tag = el.tagName;
+    var role = el.getAttribute && el.getAttribute('role');
+    if (tag !== 'BUTTON' && tag !== 'A' && role !== 'button') return false;
+    var text = ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, ' ').trim();
+    if (!text) return false;
+    return CTA_TEXT_RE.test(text);
+  };
+  const enableIfHasSelection = () => {
+    try {
+      // InLead / many Tailwind quizzes never set button[disabled] — they use
+      // cursor-not-allowed + faded wrapper (opacity-75) while React state is
+      // empty. The old query only saw real disabled attrs, so Continuar never
+      // received data-criaai-cta-unlocked and stayed visually/interactively dead.
+      var candidates = document.querySelectorAll('button, [role="button"], a[href]');
+      for (var i = 0; i < candidates.length; i += 1) {
+        var btn = candidates[i];
+        if (!isCtaButton(btn)) continue;
+        // Prefer the flex row that wraps option layers + CTA (InLead DOM).
+        var scope =
+          (btn.closest &&
+            btn.closest(
+              '.flex.flex-row.flex-wrap, .flex.flex-wrap, [class*="flex-wrap"], form, [role="form"], [data-criaai-step], section, main, [class*="step" i], [class*="question" i]',
+            )) ||
+          document.body;
+        if (!scope) continue;
+        var hasSelection = scope.querySelector(
+          'input[type="radio"]:checked, input[type="checkbox"]:checked, [aria-checked="true"], [data-criaai-checked]',
+        );
+        if (!hasSelection) {
+          var selects = scope.querySelectorAll('select');
+          for (var j = 0; j < selects.length; j += 1) {
+            if (selects[j].value && selects[j].value.length > 0) {
+              hasSelection = selects[j];
+              break;
+            }
+          }
+        }
+        if (!hasSelection) continue;
+
+        if (btn.hasAttribute('disabled')) btn.removeAttribute('disabled');
+        if (btn.getAttribute('aria-disabled') === 'true') btn.removeAttribute('aria-disabled');
+
+        try {
+          btn.classList.remove('cursor-not-allowed');
+          btn.classList.add('cursor-pointer');
+        } catch (_) {}
+
+        try {
+          var walk = btn.parentElement;
+          for (var depth = 0; depth < 5 && walk; depth += 1) {
+            var cn = walk.className || '';
+            if (typeof cn === 'string' && /opacity-75/.test(cn)) {
+              walk.classList.remove('opacity-75');
+              walk.classList.add('opacity-100');
+              break;
+            }
+            walk = walk.parentElement;
+          }
+        } catch (_) {}
+
+        btn.setAttribute('data-criaai-cta-unlocked', '');
+      }
+    } catch (_) {}
+  };
+  document.addEventListener('change', enableIfHasSelection, true);
+  document.addEventListener('click', function () { setTimeout(enableIfHasSelection, 60); }, true);
+  setTimeout(enableIfHasSelection, 800);
+  setTimeout(enableIfHasSelection, 2500);
+
+  // ----------------------------------------------------------------
+  // OPTION-CARD TOGGLE — guaranteed-functional multi-select.
+  // ----------------------------------------------------------------
+  // Strategy change vs. previous attempts: we no longer try to be
+  // "polite" to the original SPA's JS by waiting 220ms to see if it
+  // would react. The user reported (correctly) that broken
+  // checkboxes on a quiz step kill conversion entirely, so we now
+  // ALWAYS provide our own visual feedback INSTANTLY. If the
+  // original JS also reacts, that's a bonus — both can coexist.
+  //
+  // Behavior:
+  //   1. Click on an option-like element → instant visual marker
+  //      (data-criaai-checked + aria-checked=true).
+  //   2. Click again on the same element → unmarks (toggle).
+  //   3. We DON'T clear siblings — the same shim works for both
+  //      single-select (user only clicks one) AND multi-select
+  //      (user clicks several). For single-select layouts, the user
+  //      simply taps the new choice and the old one stays visually
+  //      marked too — slightly off but the CTA still unlocks and the
+  //      flow doesn't break, which is the priority.
+  //   4. Triggers \`enableIfHasSelection\` so the "Continuar" button
+  //      unlocks immediately.
+  // ----------------------------------------------------------------
+  const SIBLING_OPTION_SELECTOR =
+    'button, [role="button"], [role="option"], li, label, div[class*="option" i], div[class*="card" i], div[class*="answer" i], div[class*="choice" i], div[class*="alternative" i], a[class*="option" i], a[class*="card" i], a[class*="answer" i], a[class*="choice" i]';
+  // Quiz builders (InLead, etc.) often wrap EACH option in its own column
+  // <div class="grid"><button class="option-theme">…</button></div> so
+  // buttons are NOT siblings — the old "2+ siblings under parent" test
+  // never fired and the shim did nothing. We detect peers by walking up
+  // and counting matching controls inside a shared ancestor.
+  const OPTION_PEER_SELECTOR =
+    'button[class*="option-theme" i], button[class*="option-background" i], button[class*="option-" i], [role="radio"], [role="checkbox"], [role="option"]';
+  const isOptionLike = (node) => {
+    if (!node || node.nodeType !== 1) return false;
+    if (isCtaButton(node)) return false;
+    if (node.closest && node.closest('[data-criaai-nav-chip], [data-criaai-nav], [data-criaai-wrap], header, nav, footer')) return false;
+    // Anchors with external href are not options.
+    if (node.tagName === 'A' && node.getAttribute('href') && !/^#/.test(node.getAttribute('href') || '')) return false;
+    // Inputs/selects handle themselves natively.
+    if (node.tagName === 'INPUT' || node.tagName === 'SELECT' || node.tagName === 'TEXTAREA') return false;
+    // The earlier ARIA-aware handler already covers explicit
+    // role=checkbox/radio/switch — don't double-toggle.
+    var role = node.getAttribute && node.getAttribute('role');
+    if (role === 'checkbox' || role === 'radio' || role === 'switch' ||
+        role === 'menuitemcheckbox' || role === 'menuitemradio') return false;
+    // Heuristic 1: text length should be option-like (short label).
+    var txt = ((node.innerText || node.textContent || '') + '').trim();
+    if (txt.length > 280) return false;
+
+    // Heuristic 2a — InLead / wrapped-column layouts: climb ancestors and
+    // require 2+ OPTION_PEER_SELECTOR hits in the same subtree.
+    var walk = node;
+    for (var depth = 0; depth < 14 && walk; depth += 1) {
+      walk = walk.parentElement;
+      if (!walk) break;
+      try {
+        var peers = walk.querySelectorAll(OPTION_PEER_SELECTOR);
+        var visiblePeers = 0;
+        var hitsSelf = false;
+        for (var pi = 0; pi < peers.length; pi += 1) {
+          var p = peers[pi];
+          if (isCtaButton(p)) continue;
+          visiblePeers += 1;
+          if (p === node || (p.contains && p.contains(node))) hitsSelf = true;
+        }
+        if (visiblePeers >= 2 && hitsSelf) return true;
+      } catch (_) { /* swallow */ }
+    }
+
+    // Heuristic 2b — flat lists: 2+ option-like DIRECT siblings (legacy).
+    var parent = node.parentElement;
+    if (!parent) return false;
+    var sibCandidates = Array.from(parent.children).filter((n) => {
+      try {
+        return (
+          n !== node &&
+          n.matches &&
+          n.matches(SIBLING_OPTION_SELECTOR) &&
+          !isCtaButton(n)
+        );
+      } catch (_) {
+        return false;
+      }
+    });
+    if (sibCandidates.length >= 1) return true;
+    return false;
+  };
+  const toggleOption = (node) => {
+    if (!node) return;
+    var isChecked = node.hasAttribute('data-criaai-checked');
+    if (isChecked) {
+      node.removeAttribute('data-criaai-checked');
+      node.removeAttribute('data-criaai-active');
+      node.setAttribute('aria-checked', 'false');
+      try {
+        var cn0 = (node.className || '') + '';
+        if (/option-theme|option-background/i.test(cn0)) node.classList.remove('active');
+      } catch (_) {}
+    } else {
+      node.setAttribute('data-criaai-checked', '');
+      node.setAttribute('data-criaai-active', '');
+      node.setAttribute('aria-checked', 'true');
+      try {
+        var cn1 = (node.className || '') + '';
+        if (/option-theme|option-background/i.test(cn1)) node.classList.add('active');
+      } catch (_) {}
+    }
+    // Mirror to nested input[type=checkbox|radio] if any (so the
+    // original site's CSS rules that key off :checked also fire).
+    try {
+      var input = node.querySelector && node.querySelector('input[type="checkbox"], input[type="radio"]');
+      if (input) {
+        input.checked = !isChecked;
+        try {
+          var ev = new Event('change', { bubbles: true });
+          input.dispatchEvent(ev);
+        } catch (_) {}
+      }
+    } catch (_) {}
+    enableIfHasSelection();
+  };
+
+  document.addEventListener('click', (event) => {
+    if (editorMode === 'edit') return;
+    var target = event.target;
+    if (!target || !target.closest) return;
+    // Walk up to find the closest option-like ancestor.
+    var node = target.closest(SIBLING_OPTION_SELECTOR);
+    if (!node) return;
+    if (!isOptionLike(node)) return;
+    // We do NOT preventDefault — the original handlers may still want
+    // to advance the step. Our toggle is purely additive (visual + CTA
+    // unlock); if the original JS also reacts, both happen and the user
+    // gets correct behavior either way.
+    toggleOption(node);
+  }, false);
+
+  // Strong visual feedback the moment the user presses (even before
+  // the click resolves) — kills the "is this thing dead?" doubt.
+  document.addEventListener('pointerdown', (event) => {
+    if (editorMode === 'edit') return;
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var node = target.closest(SIBLING_OPTION_SELECTOR);
+    if (!node || !isOptionLike(node)) return;
+    node.setAttribute('data-criaai-pressed', '');
+    setTimeout(() => { try { node.removeAttribute('data-criaai-pressed'); } catch (_) {} }, 220);
+  }, true);
+
   document.documentElement.setAttribute('data-criaai-editor', 'on');
   try { window.parent.postMessage({ type: 'editor.ready' }, '*'); } catch (_) {}
 })();`;
@@ -2056,19 +3198,81 @@ function withEditorBridge(
   renderMode: 'runtime' | 'frozen',
 ): string {
   const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.documentElement.setAttribute('data-criaai-render-mode', renderMode);
   doc
     .querySelectorAll<HTMLElement>('[data-editor-selected]')
     .forEach((node) => node.removeAttribute('data-editor-selected'));
-  if (renderMode === 'frozen') {
-    doc.querySelectorAll('script').forEach((node) => node.remove());
-    doc.querySelectorAll('noscript').forEach((node) => node.remove());
-  }
+
+  // KEY DECISION: We KEEP the original scripts even in `frozen` snapshots.
+  // The previous behavior — wipe every <script> tag — broke every
+  // interactive widget the cloned site relied on (weight sliders, kg↔lb
+  // toggles, custom select cards, range pickers, calendar/date pickers,
+  // etc.) because all of those run on JavaScript that we were destroying.
+  //
+  // Risks of keeping the scripts:
+  //   1. SPAs may try to re-hydrate from a fresh state and clobber our
+  //      DOM snapshot.
+  //   2. They may trigger a redirect back to the live URL.
+  //
+  // Mitigations:
+  //   1. We strip <meta http-equiv="refresh">, every <noscript> meta-refresh
+  //      block, and every "click here if not redirected" inline script.
+  //   2. Inline scripts that contain `location.href = …` /
+  //      `window.location = …` get neutralized in-place — only the
+  //      assignment is replaced with a comment, the rest of the bundle
+  //      stays intact (so the slider initialization that lives in the same
+  //      bundle is preserved).
+  //   3. We inject a tiny shim BEFORE everything else that wraps
+  //      window.location/setters to no-op when something tries to navigate
+  //      to a different host (the user is editing — they don't want to be
+  //      kicked to the live site).
+  doc
+    .querySelectorAll('meta[http-equiv="refresh" i]')
+    .forEach((node) => node.remove());
+  doc.querySelectorAll('noscript').forEach((node) => {
+    const inner = node.innerHTML || '';
+    if (/http-equiv\s*=\s*["']?refresh/i.test(inner)) node.remove();
+  });
+  doc.querySelectorAll('script').forEach((node) => {
+    const code = node.textContent || '';
+    if (!code) return;
+    // Hard-redirect-only scripts (very common "if (!loaded) location=…"
+    // bundles): drop entirely.
+    if (
+      /^\s*(?:window|document)?\.?location(?:\.href)?\s*=\s*["']/.test(code) &&
+      code.length < 400
+    ) {
+      node.remove();
+      return;
+    }
+    // Surgical neutralization: replace only the offending assignments.
+    if (
+      /\b(?:window\.|document\.)?location(?:\s*\.\s*(?:href|assign|replace))?\s*=/.test(
+        code,
+      )
+    ) {
+      const sanitized = code.replace(
+        /\b((?:window\.|document\.)?location(?:\s*\.\s*(?:href|assign|replace))?)\s*=\s*([^;\n]+)/g,
+        '/* criaai stripped: $1 = $2 */',
+      );
+      node.textContent = sanitized;
+    }
+  });
   doc
     .querySelectorAll('meta[http-equiv="Content-Security-Policy"]')
     .forEach((node) => node.remove());
   doc
     .querySelectorAll('meta[http-equiv="Content-Security-Policy-Report-Only"]')
     .forEach((node) => node.remove());
+
+  // Inject the navigation guard FIRST so it runs before any user script
+  // that tries to redirect during boot.
+  if (doc.head) {
+    const guard = doc.createElement('script');
+    guard.id = 'criaai-nav-guard';
+    guard.textContent = NAVIGATION_GUARD_JS;
+    doc.head.insertBefore(guard, doc.head.firstChild);
+  }
 
   if (doc.head) {
     const style = doc.createElement('style');
@@ -2099,3 +3303,6 @@ async function fileToDataUrl(file: File): Promise<string> {
     reader.readAsDataURL(file);
   });
 }
+
+export { JobLoadingScreen };
+export default JobLoadingScreen;
