@@ -22,8 +22,8 @@ const argvModel = (() => {
   if (idx !== -1 && process.argv[idx + 1]) return process.argv[idx + 1];
   return null;
 })();
-const DEFAULT_MODEL = argvModel || process.env.OLLAMA_MODEL || 'qwen2.5:7b-instruct';
-const FALLBACK_MODELS = ['qwen2.5:3b-instruct', 'llama3.2:3b-instruct'];
+const DEFAULT_MODEL = argvModel || process.env.OLLAMA_MODEL || 'qwen2.5:3b-instruct';
+const FALLBACK_MODELS = ['llama3.2:3b-instruct', 'qwen2.5:1.5b-instruct'];
 
 const c = {
   g: (s) => `\x1b[32m${s}\x1b[0m`,
@@ -131,7 +131,7 @@ async function pullModel(model) {
     console.log(`    ollama pull ${model}`);
     return false;
   }
-  console.log(c.b(`\n▶ Baixando modelo ${model} (uma vez só, ~4GB)…`));
+  console.log(c.b(`\n▶ Baixando modelo ${model} (uma vez só, ~2GB pro 3B / ~4GB pro 7B)…`));
   const code = await runStreaming('ollama', ['pull', model]);
   return code === 0;
 }

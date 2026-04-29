@@ -5,6 +5,17 @@ import {
   ensureStableId,
   injectStableIdsOnCheerio,
 } from './stable-id.util';
+import {
+  CHECKOUT_DOMAIN_PATTERNS as CHECKOUT_DOMAIN_PATTERNS_SHARED,
+  CHECKOUT_TEXT_KEYWORDS as CHECKOUT_TEXT_KEYWORDS_SHARED,
+  ADVANCE_ONLY_TEXTS as ADVANCE_ONLY_TEXTS_SHARED,
+  CHECKOUT_ATTR_REGEX,
+  isLikelyCheckoutText as isLikelyCheckoutTextShared,
+  isStrongCheckoutText,
+  detectCheckoutProvider as detectCheckoutProviderShared,
+  isQuizBuilderHostUrl,
+  normalizeCheckoutText,
+} from './checkout-vocab.util';
 
 export type CustomizationKind = 'checkout' | 'video';
 
@@ -55,114 +66,12 @@ export interface CustomizationAnchor {
 
 export type CustomizationValues = Record<string, string>;
 
-const CHECKOUT_DOMAIN_PATTERNS: Array<{ regex: RegExp; provider: string }> = [
-  { regex: /hotmart\.com/i, provider: 'hotmart' },
-  { regex: /kiwify\.com|kiwify\.app/i, provider: 'kiwify' },
-  { regex: /monetizze\.com/i, provider: 'monetizze' },
-  { regex: /eduzz\.com|sun\.eduzz/i, provider: 'eduzz' },
-  { regex: /perfectpay\.com/i, provider: 'perfectpay' },
-  { regex: /ticto\.com/i, provider: 'ticto' },
-  { regex: /braip\.com/i, provider: 'braip' },
-  { regex: /yampi\.com/i, provider: 'yampi' },
-  { regex: /cartpanda\.com/i, provider: 'cartpanda' },
-  { regex: /payt\.com|voompay/i, provider: 'payt' },
-  { regex: /clickbank\.net/i, provider: 'clickbank' },
-  { regex: /pagar\.me|pagarme/i, provider: 'pagarme' },
-  { regex: /pagseguro|pagseguro\.uol/i, provider: 'pagseguro' },
-  {
-    regex: /mercadopago|mercadolivre\.com\/checkout/i,
-    provider: 'mercadopago',
-  },
-  {
-    regex: /stripe\.com\/(checkout|payment)|buy\.stripe\.com/i,
-    provider: 'stripe',
-  },
-  { regex: /paypal\.com\/checkoutnow|paypal\.me/i, provider: 'paypal' },
-  {
-    regex: /shopify\.com\/checkouts|myshopify\.com\/[^/]+\/checkouts/i,
-    provider: 'shopify',
-  },
-  { regex: /go\.hyros|go\.tryinfluencer|utmify\.com/i, provider: 'tracker' },
-  {
-    regex: /\/checkout(\/|\?|$)|\/carrinho|\/cart(\/|\?|$)/i,
-    provider: 'checkout-path',
-  },
-  { regex: /\/obrigado|\/thank-?you|\/success/i, provider: 'thankyou-path' },
-];
-
-/**
- * Keyword lists kept intentionally multi-language (PT / EN / ES).
- * Keep in sync with LlmAssistService.classifyButtonFast.
- */
-const CHECKOUT_TEXT_KEYWORDS = [
-  'comprar',
-  'quero agora',
-  'quero comprar',
-  'quero garantir',
-  'garantir',
-  'garantir minha',
-  'garantir o meu',
-  'garantir vaga',
-  'adquirir',
-  'assinar',
-  'assine',
-  'finalizar compra',
-  'finalizar pedido',
-  'ir para o checkout',
-  'chamar no whatsapp',
-  'meu plano',
-  'meu programa',
-  'get my plan',
-  'get plan',
-  'buy now',
-  'buy today',
-  'get access',
-  'get instant access',
-  'get started',
-  'claim',
-  'claim your',
-  'subscribe',
-  'sign up',
-  'order now',
-  'add to cart',
-  'checkout',
-  'proceed to checkout',
-  'enroll',
-  'comprar ahora',
-  'quiero comprar',
-  'quiero empezar',
-  'suscribirme',
-  'inscribirme',
-  'ordenar',
-  'empezar',
-  'continuar con mi plan',
-  'continuar con mi programa',
-];
-
-/**
- * Advance keywords that we should NOT treat as checkout (quiz navigation).
- */
-const ADVANCE_ONLY_TEXTS = new Set<string>([
-  'continuar',
-  'continue',
-  'next',
-  'proximo',
-  'próximo',
-  'siguiente',
-  'avancar',
-  'avançar',
-  'avanzar',
-  'submit',
-  'enviar',
-  'ok',
-  'aceitar',
-  'aceptar',
-  'concordo',
-  'i agree',
-  'start',
-  'begin',
-  'empezar',
-]);
+// Checkout vocabulary moved to `./checkout-vocab.util.ts` so the walker
+// (browser-side) and the cloner anchor detector both consume the same lists.
+// We keep local aliases for readability throughout this file.
+const CHECKOUT_DOMAIN_PATTERNS = CHECKOUT_DOMAIN_PATTERNS_SHARED;
+const CHECKOUT_TEXT_KEYWORDS = CHECKOUT_TEXT_KEYWORDS_SHARED;
+const ADVANCE_ONLY_TEXTS = ADVANCE_ONLY_TEXTS_SHARED;
 
 const VIDEO_IFRAME_PATTERNS: Array<{ regex: RegExp; provider: string }> = [
   { regex: /youtube\.com\/embed|youtu\.be/i, provider: 'youtube' },
@@ -200,20 +109,48 @@ const VIDEO_CONTAINER_ATTRS = [
   'data-criaai-vsl',
 ];
 
-function normalizeText(text: string): string {
-  return text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+// Local aliases — implementations live in checkout-vocab.util.ts so the
+// browser-side walker uses the exact same logic.
+const normalizeText = normalizeCheckoutText;
+const isLikelyCheckoutText = isLikelyCheckoutTextShared;
 
-function isLikelyCheckoutText(text: string): boolean {
-  const normalized = normalizeText(text);
-  if (!normalized || normalized.length > 120) return false;
-  if (ADVANCE_ONLY_TEXTS.has(normalized)) return false;
-  return CHECKOUT_TEXT_KEYWORDS.some((keyword) => normalized.includes(keyword));
+/**
+ * Returns true when the element (or any of its first two ancestors) has an
+ * attribute value that matches `CHECKOUT_ATTR_REGEX`. Mirrors the browser
+ * probe's `detectCheckoutByAttr` so the static Cheerio pass agrees with the
+ * live walker about what counts as an explicit checkout tag. Property-first:
+ * this is the signal that elevates a button from "maybe checkout" to
+ * "definitely customization-worthy".
+ */
+function elementHasCheckoutAttr(
+  el: Cheerio<CheerioElement>,
+  $: CheerioAPI,
+): boolean {
+  const ATTR_NAMES = [
+    'data-testid',
+    'data-test',
+    'data-qa',
+    'id',
+    'name',
+    'class',
+    'data-event',
+    'data-analytics',
+    'aria-label',
+  ];
+  const check = (node: Cheerio<CheerioElement>): boolean => {
+    if (!node.length) return false;
+    for (const attr of ATTR_NAMES) {
+      const value = (node.attr(attr) ?? '').trim();
+      if (value && CHECKOUT_ATTR_REGEX.test(value)) return true;
+    }
+    return false;
+  };
+  if (check(el)) return true;
+  const parent = el.parent();
+  if (check(parent)) return true;
+  const grand = parent.parent();
+  if (check(grand)) return true;
+  return false;
 }
 
 /**
@@ -237,12 +174,11 @@ function isInternalNavigationHref(href: string): boolean {
   return false;
 }
 
-function detectCheckoutProvider(url: string): string | undefined {
-  for (const entry of CHECKOUT_DOMAIN_PATTERNS) {
-    if (entry.regex.test(url)) return entry.provider;
-  }
-  return undefined;
+function isExternalHttpHref(href: string): boolean {
+  return /^https?:\/\//i.test((href ?? '').trim());
 }
+
+const detectCheckoutProvider = detectCheckoutProviderShared;
 
 function detectVideoProvider(src: string): string | undefined {
   for (const entry of VIDEO_IFRAME_PATTERNS) {
@@ -339,6 +275,64 @@ export function detectCustomizationAnchors(
     });
   };
 
+  // PRIORITY PASS — elements stamped with `data-criaai-checkout` by the
+  // walker probe (it ran in the live DOM, so it had access to runtime
+  // state the static HTML doesn't always show). The marker carries the
+  // detected provider as its value ("hotmart", "stripe", "text-cta", …).
+  $('[data-criaai-checkout]').each((_, raw) => {
+    const el = $(raw);
+    const markerValue = (el.attr('data-criaai-checkout') ?? '').trim();
+    const provider =
+      markerValue &&
+      markerValue !== 'text-cta' &&
+      markerValue !== 'strong-text-cta' &&
+      markerValue !== 'llm-cta' &&
+      markerValue !== 'attr-cta'
+        ? markerValue
+        : undefined;
+    const tagName = (el.get(0)?.tagName ?? '').toLowerCase();
+    const text = el.text().trim();
+    const href = (el.attr('href') ?? '').trim();
+    if (tagName === 'a') {
+      pushAnchor(
+        'checkout',
+        el,
+        text || href,
+        href || undefined,
+        provider,
+        'rewrite-href',
+      );
+    } else if (tagName === 'form') {
+      const action = (el.attr('action') ?? '').trim();
+      pushAnchor(
+        'checkout',
+        el,
+        text || action,
+        action || undefined,
+        provider,
+        'rewrite-action',
+      );
+    } else {
+      const dataHref = (el.attr('data-href') ?? el.attr('data-url') ?? '').trim();
+      let checkoutUrl = dataHref;
+      if (!checkoutUrl) {
+        const bid = (el.attr('id') ?? '').trim();
+        if (/^[a-zA-Z0-9_-]+$/.test(bid)) {
+          const helperHref = $(`a[id="${bid}-button"]`).first().attr('href');
+          if (helperHref) checkoutUrl = helperHref.trim();
+        }
+      }
+      pushAnchor(
+        'checkout',
+        el,
+        text || tagName || 'cta',
+        checkoutUrl || undefined,
+        provider,
+        'inject-click',
+      );
+    }
+  });
+
   $('a[href]').each((_, raw) => {
     const el = $(raw);
     const href = (el.attr('href') ?? '').trim();
@@ -353,6 +347,16 @@ export function detectCustomizationAnchors(
       // Internal link with buy-like text — still a customizable CTA: user can
       // swap the href for their own checkout URL.
       pushAnchor('checkout', el, text || href, href, undefined, 'rewrite-href');
+    } else if (isExternalHttpHref(href) && !isQuizBuilderHostUrl(href)) {
+      // Any external URL editable — except quiz-builder hosts (InLead footer, etc.).
+      pushAnchor(
+        'checkout',
+        el,
+        text || `Link externo · ${href}`,
+        href,
+        'external-link',
+        'rewrite-href',
+      );
     }
   });
 
@@ -383,6 +387,15 @@ export function detectCustomizationAnchors(
         undefined,
         'rewrite-action',
       );
+    } else if (isExternalHttpHref(action) && !isQuizBuilderHostUrl(action)) {
+      pushAnchor(
+        'checkout',
+        el,
+        text || `Form externo · ${action}`,
+        action,
+        'external-link',
+        'rewrite-action',
+      );
     }
   });
 
@@ -390,10 +403,32 @@ export function detectCustomizationAnchors(
     (_, raw) => {
       const el = $(raw);
       const text = el.text().trim() || (el.attr('value') ?? '').trim();
-      if (!isLikelyCheckoutText(text)) return;
+
+      // PROPERTY-FIRST: the static pass only turns a plain button into a
+      // checkout anchor when we have HARD evidence on the element itself:
+      //   1) the walker already stamped it with `data-criaai-checkout`
+      //      (handled by the priority pass above — skip here to avoid
+      //      duplicates), OR
+      //   2) an attribute (data-testid, id, class, aria-label, …) matches
+      //      the checkout attribute regex — framework-agnostic, language-
+      //      agnostic, explicit author intent, OR
+      //   3) the visible label matches the NARROW strong-text list (e.g.
+      //      "OBTENER MI PLAN", "Buy now", "Comprar agora"). Plain
+      //      "Continuar" / "Continue" does NOT qualify here, even when the
+      //      surrounding heading mentions "plan" / "plano".
+      // This keeps results/upsell screens out of the editor's Checkout tab.
+      if (el.attr('data-criaai-checkout') != null) return;
+      const dataHref = (el.attr('data-href') ?? el.attr('data-url') ?? '').trim();
+      const hasDataHrefSignal = Boolean(
+        dataHref &&
+          (detectCheckoutProvider(dataHref) ||
+            (isExternalHttpHref(dataHref) && !isQuizBuilderHostUrl(dataHref))),
+      );
+      const hasAttrSignal = elementHasCheckoutAttr(el, $);
+      const hasStrongText = isStrongCheckoutText(text);
+      if (!hasAttrSignal && !hasStrongText && !hasDataHrefSignal) return;
 
       const onclick = el.attr('onclick') ?? '';
-      const dataHref = el.attr('data-href') ?? el.attr('data-url') ?? '';
       const parentLink = el.closest('a[href]');
 
       let currentValue: string | undefined;
@@ -407,7 +442,11 @@ export function detectCustomizationAnchors(
       }
       if (dataHref) {
         currentValue = dataHref;
-        provider = detectCheckoutProvider(dataHref);
+        provider =
+          detectCheckoutProvider(dataHref) ??
+          (isExternalHttpHref(dataHref) && !isQuizBuilderHostUrl(dataHref)
+            ? 'external-link'
+            : undefined);
         behavior = 'inject-click';
       }
       if (!currentValue && onclick) {
@@ -418,9 +457,9 @@ export function detectCustomizationAnchors(
         }
       }
 
-      // Even without any URL — if the button TEXT is clearly a CTA
-      // ("Get my plan", "Quero comprar") we still expose it: the user will
-      // supply the URL and we inject an onclick at apply-time.
+      // Even without any URL — if the button carries explicit property or
+      // strong-text evidence we still expose it: the user will supply the
+      // URL and we inject an onclick at apply-time.
       pushAnchor('checkout', el, text, currentValue, provider, behavior);
     },
   );
@@ -471,14 +510,12 @@ export function detectCustomizationAnchors(
   // CriaAI-native checkout marker — guarantees detection on generator-emitted
   // CTAs regardless of copy language. The tag decides the wire behavior.
   $('[data-criaai-checkout]').each((_, raw) => {
-    const el = $(raw as CheerioElement);
+    const el = $(raw);
     const label =
       el.text().trim() ||
       (el.attr('aria-label') ?? '').trim() ||
       `Checkout · ${(el.attr('data-criaai-checkout') ?? 'slot').trim()}`;
-    const tag = (
-      (el.get(0) as CheerioElement).tagName ?? 'div'
-    ).toLowerCase();
+    const tag = ((el.get(0) as CheerioElement).tagName ?? 'div').toLowerCase();
     const href = (el.attr('href') ?? '').trim();
     let behavior: CustomizationBehavior;
     if (tag === 'a') behavior = 'rewrite-href';
@@ -487,23 +524,39 @@ export function detectCustomizationAnchors(
     const provider =
       (href && detectCheckoutProvider(href)) ||
       `criaai-${(el.attr('data-criaai-checkout') ?? 'primary').trim()}`;
-    pushAnchor(
-      'checkout',
-      el,
-      label,
-      href || undefined,
-      provider,
-      behavior,
-    );
+    pushAnchor('checkout', el, label, href || undefined, provider, behavior);
   });
 
   return anchors;
 }
 
 /**
+ * Keeps `customizationValues` keyed by both ephemeral anchor ids (`ck-q03-005`)
+ * and stable `groupId`s (`checkout-<stableId>`). Anchor counters are regenerated
+ * whenever HTML changes; syncing prevents orphaned ids so ZIP export still sees
+ * the user's URLs.
+ */
+export function syncCustomizationGroupKeys(
+  anchors: CustomizationAnchor[],
+  values: CustomizationValues,
+): CustomizationValues {
+  const next = { ...values };
+  for (const anchor of anchors) {
+    if (!anchor.groupId) continue;
+    const byId = (next[anchor.id] ?? '').trim();
+    const byGroup = (next[anchor.groupId] ?? '').trim();
+    if (byId && !byGroup) next[anchor.groupId] = byId;
+    else if (byGroup && !byId) next[anchor.id] = byGroup;
+  }
+  return next;
+}
+
+/**
  * Copies a value set on one anchor to every other anchor in the same
  * `groupId`. Lets the user edit the checkout URL in step q05 and have it
  * automatically apply to the same button in steps q12, q18, etc.
+ *
+ * Also honors values stored directly under `groupId` (stable across counter churn).
  */
 export function expandValuesAcrossGroups(
   anchors: CustomizationAnchor[],
@@ -512,6 +565,14 @@ export function expandValuesAcrossGroups(
   if (!anchors.length || !values) return values ?? {};
   const expanded: CustomizationValues = { ...values };
   const byGroup = new Map<string, string>();
+
+  for (const anchor of anchors) {
+    if (!anchor.groupId) continue;
+    const fromGroupKey = (values[anchor.groupId] ?? '').trim();
+    if (fromGroupKey && !byGroup.has(anchor.groupId)) {
+      byGroup.set(anchor.groupId, fromGroupKey);
+    }
+  }
   for (const anchor of anchors) {
     if (!anchor.groupId) continue;
     const v = (values[anchor.id] ?? '').trim();
@@ -522,7 +583,7 @@ export function expandValuesAcrossGroups(
   if (!byGroup.size) return expanded;
   for (const anchor of anchors) {
     if (!anchor.groupId) continue;
-    if (expanded[anchor.id] && expanded[anchor.id].trim()) continue;
+    if ((expanded[anchor.id] ?? '').trim()) continue;
     const groupV = byGroup.get(anchor.groupId);
     if (groupV) expanded[anchor.id] = groupV;
   }

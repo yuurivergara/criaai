@@ -1,0 +1,91 @@
+{
+  "$schema": "./clone-fixtures.schema.json",
+  "description": "Test suite of public URLs used by `npm run diagnose:clone -- --suite`. Each entry covers a stack we want the cloning pipeline to handle (or fail gracefully on). 'expectation' is the minimum we expect from the pipeline; the diagnose script enforces it.",
+  "fixtures": [
+    {
+      "id": "static-lp",
+      "label": "Static landing page (vanilla HTML)",
+      "url": "https://example.com",
+      "kind": "static-lp",
+      "expectation": {
+        "minBodyTextLength": 200,
+        "shouldFailWithAntiBot": false
+      }
+    },
+    {
+      "id": "wordpress-elementor",
+      "label": "LP em WordPress + Elementor",
+      "url": "https://elementor.com",
+      "kind": "wordpress-elementor",
+      "expectation": {
+        "minBodyTextLength": 800,
+        "minVisibleImages": 3,
+        "shouldFailWithAntiBot": false
+      }
+    },
+    {
+      "id": "webflow-lp",
+      "label": "LP estatica em Webflow",
+      "url": "https://webflow.com",
+      "kind": "webflow",
+      "expectation": {
+        "minBodyTextLength": 800,
+        "minVisibleImages": 3,
+        "shouldFailWithAntiBot": false
+      }
+    },
+    {
+      "id": "wix-lp",
+      "label": "LP em Wix",
+      "url": "https://www.wix.com",
+      "kind": "wix",
+      "expectation": {
+        "minBodyTextLength": 600,
+        "minVisibleImages": 2,
+        "shouldFailWithAntiBot": false
+      }
+    },
+    {
+      "id": "nextjs-spa",
+      "label": "SPA Next.js (vercel.com)",
+      "url": "https://vercel.com",
+      "kind": "nextjs-spa",
+      "expectation": {
+        "minBodyTextLength": 800,
+        "shouldFailWithAntiBot": false
+      }
+    },
+    {
+      "id": "cakto-quiz",
+      "label": "Quiz hospedado pelo Cakto",
+      "url": "https://pay.cakto.com.br",
+      "kind": "cakto-quiz",
+      "expectation": {
+        "minBodyTextLength": 100,
+        "shouldFailWithAntiBot": false,
+        "notes": "Substituir 'url' por um link de quiz real do Cakto antes de rodar a suite no CI; o dominio raiz nao expoe um quiz, mas serve de smoke test do host."
+      }
+    },
+    {
+      "id": "kiwify-quiz",
+      "label": "Quiz/checkout Kiwify",
+      "url": "https://kiwify.com.br",
+      "kind": "kiwify-quiz",
+      "expectation": {
+        "minBodyTextLength": 600,
+        "shouldFailWithAntiBot": false,
+        "notes": "Substituir por um quiz/checkout publico real antes de rodar no CI."
+      }
+    },
+    {
+      "id": "cloudflare-protected",
+      "label": "Site protegido por Cloudflare (deve falhar com erro claro)",
+      "url": "https://nowsecure.nl",
+      "kind": "cloudflare-protected",
+      "expectation": {
+        "shouldFailWithAntiBot": true,
+        "expectedAntiBotProvider": "cloudflare"
+      }
+    }
+  ]
+}

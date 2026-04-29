@@ -1,0 +1,65 @@
+# ============================================================================
+# docker-compose.prod.yml
+#
+# Stack de produção com:
+#   • Caddy (TLS automático on-demand para domínios customizados)
+#   • Backend NestJS
+#   • Postgres + Redis
+#
+# Use:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Variáveis necessárias no .env:
+#   PUBLIC_DOMAIN=app.suaempresa.com
+#   ACME_EMAIL=admin@suaempresa.com
+#   PUBLIC_BASE_URL=https://app.suaempresa.com/v1/public
+#   (opcional) CRIAAI_PUBLIC_PAGE_BASE_URL=… — sobrescreve só o link público CriaAI
+#   CRIAAI_PUBLIC_HOST=app.suaempresa.com
+# ============================================================================
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: criaai-caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-app.criaai.local}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@criaai.local}
+      BACKEND_UPSTREAM: backend:3000
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+  backend:
+    image: node:22-alpine
+    container_name: criaai-backend
+    restart: unless-stopped
+    working_dir: /app
+    command: ['sh', '-c', 'npm install --omit=dev && npm run start:prod']
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/criaai
+      REDIS_URL: redis://redis:6379
+      PORT: '3000'
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      CRIAAI_PUBLIC_PAGE_BASE_URL: ${CRIAAI_PUBLIC_PAGE_BASE_URL:-}
+      CRIAAI_PUBLIC_HOST: ${CRIAAI_PUBLIC_HOST}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    expose:
+      - '3000'
+
+volumes:
+  caddy_data:
+  caddy_config:

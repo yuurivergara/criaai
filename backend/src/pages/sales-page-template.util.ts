@@ -137,7 +137,8 @@ const I18N = {
   'pt-BR': {
     painTitle: 'Você se reconhece nisso?',
     agitationTitle: 'E isso, no fundo, te custa mais do que parece',
-    mechanismTitle: 'Por que nosso método funciona (mesmo se você já tentou de tudo)',
+    mechanismTitle:
+      'Por que nosso método funciona (mesmo se você já tentou de tudo)',
     benefitsTitle: 'O que você vai conquistar',
     bonusTitle: 'Bônus inclusos na sua inscrição',
     offerTitle: 'A oferta completa',
@@ -147,10 +148,12 @@ const I18N = {
     proofTitle: 'Os números não mentem',
     urgencyTitle: 'Atenção',
     finalTitle: 'Pronto para começar?',
-    finalSub: 'Sua transformação começa no próximo clique — e você está a um passo.',
+    finalSub:
+      'Sua transformação começa no próximo clique — e você está a um passo.',
     ctaSub: 'Acesso imediato após a confirmação',
     ctaPlaceholder: 'Cole aqui o link da sua VSL',
-    vslHint: 'Suporta YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI e qualquer embed.',
+    vslHint:
+      'Suporta YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI e qualquer embed.',
   },
   'en-US': {
     painTitle: 'Does this sound familiar?',
@@ -165,15 +168,18 @@ const I18N = {
     proofTitle: "Numbers don't lie",
     urgencyTitle: 'Heads up',
     finalTitle: 'Ready to start?',
-    finalSub: 'Your transformation starts with the next click — you are one step away.',
+    finalSub:
+      'Your transformation starts with the next click — you are one step away.',
     ctaSub: 'Instant access after confirmation',
     ctaPlaceholder: 'Paste your VSL link here',
-    vslHint: 'Supports YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI and any embed.',
+    vslHint:
+      'Supports YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI and any embed.',
   },
   'es-ES': {
     painTitle: '¿Te identificas con esto?',
     agitationTitle: 'Y en el fondo, te está costando más de lo que parece',
-    mechanismTitle: 'Por qué nuestro método funciona (aunque ya lo hayas intentado todo)',
+    mechanismTitle:
+      'Por qué nuestro método funciona (aunque ya lo hayas intentado todo)',
     benefitsTitle: 'Lo que vas a lograr',
     bonusTitle: 'Bonos incluidos en tu inscripción',
     offerTitle: 'La oferta completa',
@@ -186,7 +192,8 @@ const I18N = {
     finalSub: 'Tu transformación empieza en el próximo clic — estás a un paso.',
     ctaSub: 'Acceso inmediato tras la confirmación',
     ctaPlaceholder: 'Pega aquí el enlace de tu VSL',
-    vslHint: 'Compatible con YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI y cualquier embed.',
+    vslHint:
+      'Compatible con YouTube, Vimeo, Wistia, Panda Video, VTurb, ConverteAI y cualquier embed.',
   },
 } as const;
 
@@ -402,7 +409,10 @@ function renderMechanism(copy: SalesPageCopy): string {
   `;
 }
 
-function renderBenefits(copy: SalesPageCopy, emphasis: 'grid' | 'list'): string {
+function renderBenefits(
+  copy: SalesPageCopy,
+  emphasis: 'grid' | 'list',
+): string {
   if (!copy.benefits?.length) return '';
   const t = I18N[copy.language];
   if (emphasis === 'list') {

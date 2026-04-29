@@ -1,4 +1,5 @@
-import { load } from 'cheerio';
+import { load, type Cheerio, type CheerioAPI } from 'cheerio';
+import type { Element as CheerioElement } from 'domhandler';
 import { CRIAAI_ID_ATTR } from './stable-id.util';
 
 export interface NavigationEdge {
@@ -39,6 +40,47 @@ export function rewriteNavigation(
 ): string {
   const $ = load(html);
   const edges = navigationMap.filter((edge) => edge.fromStepId === stepId);
+  const OPTION_LIKE_SELECTOR =
+    'button.option-theme, button[class*="option" i], [role="radio"], [role="option"], label';
+
+  const applyDestination = (
+    target: Cheerio<CheerioElement> | Cheerio<unknown>,
+    toStepId: string,
+    destination: string,
+  ): void => {
+    const $target = target as unknown as Cheerio<CheerioElement>;
+    const tagName = (
+      $target.get(0) as { tagName?: string } | undefined
+    )?.tagName?.toLowerCase();
+    $target.attr('data-criaai-nav', toStepId);
+    stripInterceptingHandlers($, $target);
+
+    if (tagName === 'a') {
+      $target.attr('href', destination);
+      $target.removeAttr('target');
+      $target.attr('data-href', destination);
+      return;
+    }
+
+    const parentAnchor = $target.closest('a');
+    if (parentAnchor.length) {
+      parentAnchor.attr('href', destination);
+      parentAnchor.removeAttr('target');
+      parentAnchor.attr('data-href', destination);
+      stripInterceptingHandlers($, parentAnchor);
+      return;
+    }
+
+    const escaped = destination
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    const onclickJs = `window.location.href='${destination.replace(/'/g, "\\'")}';return false;`;
+    const innerHtml = $.html($target);
+    $target.replaceWith(
+      `<a href="${escaped}" data-href="${escaped}" data-criaai-wrap="${toStepId}" onclick="${onclickJs}" style="color:inherit;text-decoration:none;display:contents;">${innerHtml}</a>`,
+    );
+  };
 
   for (const edge of edges) {
     let target = edge.actionId
@@ -66,29 +108,43 @@ export function rewriteNavigation(
     const destination = resolver(edge.toStepId);
     if (!destination) continue;
 
-    const tagName = (
-      target.get(0) as { tagName?: string } | undefined
-    )?.tagName?.toLowerCase();
+    applyDestination(target, edge.toStepId, destination);
 
-    target.attr('data-criaai-nav', edge.toStepId);
-
-    if (tagName === 'a') {
-      target.attr('href', destination);
-      target.removeAttr('target');
-      continue;
+    // Heuristic propagation for option lists:
+    // If the navigation map only captured one option in a radio-like group,
+    // export all sibling options with the same destination so offline ZIP
+    // navigation doesn't "work only on first option".
+    const targetNode = target.get(0);
+    if (!targetNode) continue;
+    let groupRoot: Cheerio<CheerioElement> | null = null;
+    let walker = target as Cheerio<CheerioElement>;
+    for (let depth = 0; depth < 8; depth += 1) {
+      walker = walker.parent();
+      if (!walker.length) break;
+      let peers: CheerioElement[] = [];
+      try {
+        peers = walker.find(OPTION_LIKE_SELECTOR).toArray();
+      } catch {
+        peers = [];
+      }
+      if (peers.length >= 2 && peers.includes(targetNode as CheerioElement)) {
+        groupRoot = walker;
+        break;
+      }
     }
-
-    const parentAnchor = target.closest('a');
-    if (parentAnchor.length) {
-      parentAnchor.attr('href', destination);
-      parentAnchor.removeAttr('target');
-      continue;
+    if (!groupRoot) continue;
+    const siblings = groupRoot.find(OPTION_LIKE_SELECTOR).toArray();
+    for (const raw of siblings) {
+      if (raw === targetNode) continue;
+      const peer = $(raw);
+      if (
+        peer.attr('data-criaai-nav') ||
+        peer.closest('[data-criaai-wrap]').length
+      ) {
+        continue;
+      }
+      applyDestination(peer, edge.toStepId, destination);
     }
-
-    const html = $.html(target);
-    target.replaceWith(
-      `<a href="${destination}" data-criaai-wrap="${edge.toStepId}" style="color:inherit;text-decoration:none;display:contents;">${html}</a>`,
-    );
   }
 
   if (options?.neutralizeExternal) {
@@ -100,6 +156,43 @@ export function rewriteNavigation(
   }
 
   return $.html();
+}
+
+/**
+ * Removes attributes that the original SPA used to intercept clicks/submits
+ * and defer to its own client-side router. After cloning, that router
+ * doesn't exist, so the listeners just preventDefault() and silently break
+ * navigation. Stripping them lets the wrapped `<a href>` (or the rewritten
+ * href) take over cleanly.
+ */
+function stripInterceptingHandlers(
+  _$: CheerioAPI,
+  el: Cheerio<CheerioElement> | Cheerio<unknown>,
+): void {
+  const $el = el as unknown as Cheerio<CheerioElement>;
+  const handlerAttrs = [
+    'onclick',
+    'onmousedown',
+    'onmouseup',
+    'onpointerdown',
+    'onpointerup',
+    'ontouchstart',
+    'ontouchend',
+    'onsubmit',
+  ];
+  for (const attr of handlerAttrs) {
+    if ($el.attr(attr) !== undefined) $el.removeAttr(attr);
+  }
+  // SPA-routing data attributes used by Vue/React/Next/Nuxt routers.
+  const routerAttrs = [
+    'data-router-link',
+    'data-link-to',
+    'data-route',
+    'data-navigation',
+  ];
+  for (const attr of routerAttrs) {
+    if ($el.attr(attr) !== undefined) $el.removeAttr(attr);
+  }
 }
 
 /**

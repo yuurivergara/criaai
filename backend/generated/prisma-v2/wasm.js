@@ -93,6 +93,15 @@ exports.Prisma.TransactionIsolationLevel = makeStrictEnum({
   Serializable: 'Serializable'
 });
 
+exports.Prisma.UserScalarFieldEnum = {
+  id: 'id',
+  email: 'email',
+  passwordHash: 'passwordHash',
+  name: 'name',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
 exports.Prisma.JobScalarFieldEnum = {
   id: 'id',
   type: 'type',
@@ -100,6 +109,7 @@ exports.Prisma.JobScalarFieldEnum = {
   payload: 'payload',
   result: 'result',
   error: 'error',
+  userId: 'userId',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
 };
@@ -113,6 +123,7 @@ exports.Prisma.PageScalarFieldEnum = {
   slug: 'slug',
   publishedBundle: 'publishedBundle',
   latestVersionId: 'latestVersionId',
+  userId: 'userId',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
 };
@@ -124,6 +135,20 @@ exports.Prisma.PageVersionScalarFieldEnum = {
   html: 'html',
   meta: 'meta',
   createdAt: 'createdAt'
+};
+
+exports.Prisma.CustomDomainScalarFieldEnum = {
+  id: 'id',
+  pageId: 'pageId',
+  host: 'host',
+  verificationToken: 'verificationToken',
+  status: 'status',
+  verifiedAt: 'verifiedAt',
+  lastCheckedAt: 'lastCheckedAt',
+  lastCheckMessage: 'lastCheckMessage',
+  label: 'label',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
 };
 
 exports.Prisma.SortOrder = {
@@ -145,22 +170,24 @@ exports.Prisma.QueryMode = {
   insensitive: 'insensitive'
 };
 
+exports.Prisma.NullsOrder = {
+  first: 'first',
+  last: 'last'
+};
+
 exports.Prisma.JsonNullValueFilter = {
   DbNull: Prisma.DbNull,
   JsonNull: Prisma.JsonNull,
   AnyNull: Prisma.AnyNull
 };
 
-exports.Prisma.NullsOrder = {
-  first: 'first',
-  last: 'last'
-};
-
 
 exports.Prisma.ModelName = {
+  User: 'User',
   Job: 'Job',
   Page: 'Page',
-  PageVersion: 'PageVersion'
+  PageVersion: 'PageVersion',
+  CustomDomain: 'CustomDomain'
 };
 /**
  * Create the Client
@@ -201,7 +228,6 @@ const config = {
     "db"
   ],
   "activeProvider": "postgresql",
-  "postinstall": false,
   "inlineDatasources": {
     "db": {
       "url": {
@@ -210,13 +236,13 @@ const config = {
       }
     }
   },
-  "inlineSchema": "generator client {\n  provider = \"prisma-client-js\"\n  output   = \"../generated/prisma-v2\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n\nmodel Job {\n  id        String   @id\n  type      String\n  status    String\n  payload   Json\n  result    Json?\n  error     String?\n  createdAt DateTime\n  updatedAt DateTime\n}\n\nmodel Page {\n  id              String   @id\n  sourceType      String\n  status          String\n  sourceUrl       String?\n  publicUrl       String?\n  slug            String?  @unique\n  publishedBundle Json?\n  latestVersionId String?\n  createdAt       DateTime\n  updatedAt       DateTime\n}\n\nmodel PageVersion {\n  id        String   @id\n  pageId    String\n  title     String\n  html      String\n  meta      Json\n  createdAt DateTime\n\n  @@index([pageId])\n}\n",
-  "inlineSchemaHash": "b2f60ff148c16f6e8d09b7fdfde2013a47d3409e5ebb9f5fa4f7855882a2faa2",
+  "inlineSchema": "generator client {\n  provider = \"prisma-client-js\"\n  output   = \"../generated/prisma-v2\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n\n/// Application user (e-mail + password). Owns Pages, Jobs and CustomDomains.\nmodel User {\n  id           String   @id\n  email        String   @unique\n  passwordHash String\n  name         String?\n  createdAt    DateTime\n  updatedAt    DateTime\n}\n\nmodel Job {\n  id        String   @id\n  type      String\n  status    String\n  payload   Json\n  result    Json?\n  error     String?\n  /// Owner of the job. Nullable for legacy rows + worker-internal jobs.\n  userId    String?\n  createdAt DateTime\n  updatedAt DateTime\n\n  @@index([userId])\n}\n\nmodel Page {\n  id              String   @id\n  sourceType      String\n  status          String\n  sourceUrl       String?\n  publicUrl       String?\n  slug            String?  @unique\n  publishedBundle Json?\n  latestVersionId String?\n  /// Owner of the page. Nullable for legacy rows created before auth.\n  userId          String?\n  createdAt       DateTime\n  updatedAt       DateTime\n\n  @@index([userId])\n}\n\nmodel PageVersion {\n  id        String   @id\n  pageId    String\n  title     String\n  html      String\n  meta      Json\n  createdAt DateTime\n\n  @@index([pageId])\n}\n\n/// Custom domain (e.g. \"quiz.minhamarca.com\") attached to a published Page.\n/// The middleware uses `host` to route incoming requests to the matching\n/// page bundle. Verification is done via a one-time TXT record so we know\n/// the user actually owns the domain before serving content under it.\nmodel CustomDomain {\n  id                String    @id\n  pageId            String\n  /// Lowercase hostname (no scheme/port). Unique across the system.\n  host              String    @unique\n  /// Random token the user must publish as TXT _criaai-verify.<host>.\n  verificationToken String\n  /// pending | verified | active | error\n  status            String\n  /// Filled after successful TXT lookup.\n  verifiedAt        DateTime?\n  /// Last verification attempt outcome (success or error message).\n  lastCheckedAt     DateTime?\n  lastCheckMessage  String?\n  /// Optional friendly label shown in the UI.\n  label             String?\n  createdAt         DateTime\n  updatedAt         DateTime\n\n  @@index([pageId])\n  @@index([status])\n}\n",
+  "inlineSchemaHash": "445d193965f862cc0673c6aa62a969a184b54f792a9edaaf0cf596d02c39c52f",
   "copyEngine": true
 }
 config.dirname = '/'
 
-config.runtimeDataModel = JSON.parse("{\"models\":{\"Job\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"type\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"status\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"payload\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"result\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"error\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"Page\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"sourceType\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"status\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"sourceUrl\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"publicUrl\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"slug\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"publishedBundle\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"latestVersionId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"PageVersion\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"pageId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"title\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"html\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"meta\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null}},\"enums\":{},\"types\":{}}")
+config.runtimeDataModel = JSON.parse("{\"models\":{\"User\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"email\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"passwordHash\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"name\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"Job\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"type\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"status\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"payload\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"result\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"error\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"userId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"Page\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"sourceType\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"status\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"sourceUrl\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"publicUrl\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"slug\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"publishedBundle\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"latestVersionId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"userId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"PageVersion\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"pageId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"title\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"html\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"meta\",\"kind\":\"scalar\",\"type\":\"Json\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null},\"CustomDomain\":{\"fields\":[{\"name\":\"id\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"pageId\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"host\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"verificationToken\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"status\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"verifiedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"lastCheckedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"lastCheckMessage\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"label\",\"kind\":\"scalar\",\"type\":\"String\"},{\"name\":\"createdAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"},{\"name\":\"updatedAt\",\"kind\":\"scalar\",\"type\":\"DateTime\"}],\"dbName\":null}},\"enums\":{},\"types\":{}}")
 defineDmmfProperty(exports.Prisma, config.runtimeDataModel)
 config.engineWasm = {
   getRuntime: async () => require('./query_engine_bg.js'),

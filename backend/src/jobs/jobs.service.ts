@@ -15,6 +15,7 @@ export class JobsService {
   async create(
     type: JobType,
     payload: Record<string, unknown>,
+    userId?: string | null,
   ): Promise<JobRecord> {
     const now = new Date().toISOString();
     const job: JobRecord = {
@@ -23,6 +24,7 @@ export class JobsService {
       status: 'pending',
       createdAt: now,
       updatedAt: now,
+      userId: userId ?? null,
       payload,
     };
     await this.prismaService.job.create({
@@ -31,6 +33,7 @@ export class JobsService {
         type: job.type,
         status: job.status,
         payload: payload as Prisma.InputJsonValue,
+        userId: job.userId ?? null,
         createdAt: new Date(job.createdAt),
         updatedAt: new Date(job.updatedAt),
       },
@@ -47,6 +50,18 @@ export class JobsService {
       throw new NotFoundException(`Job ${jobId} not found`);
     }
     return this.mapToRecord(job);
+  }
+
+  /**
+   * Same as `getById`, but raises 404 if the job doesn't belong to the
+   * given user. Pass `null` to allow only userless rows (rare).
+   */
+  async getByIdForUser(jobId: string, userId: string): Promise<JobRecord> {
+    const job = await this.getById(jobId);
+    if (job.userId && job.userId !== userId) {
+      throw new NotFoundException(`Job ${jobId} not found`);
+    }
+    return job;
   }
 
   async updateStatus(
@@ -92,6 +107,52 @@ export class JobsService {
     return records.map((item) => this.mapToRecord(item));
   }
 
+  /**
+   * Looks up the most recent non-terminal job of a given type that
+   * targets the same source URL for a given user. Used by the
+   * clone-job dedup path so a duplicate submission within the dedup
+   * window resolves to the existing in-flight job rather than spawning
+   * a parallel pipeline.
+   *
+   * `sourceUrl` is matched against `payload.sourceUrl` exactly as the
+   * caller stores it. `windowMs` bounds how far back we look so an
+   * unrelated old failure doesn't get reused.
+   */
+  async findRecentByTypeAndUrl(
+    type: JobType,
+    sourceUrl: string,
+    userId: string | null,
+    windowMs: number,
+  ): Promise<JobRecord | null> {
+    const from = new Date(Date.now() - windowMs);
+    const records = await this.prismaService.job.findMany({
+      where: {
+        type,
+        userId: userId ?? null,
+        status: {
+          in: ['pending', 'processing'],
+        },
+        createdAt: {
+          gte: from,
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+      take: 25,
+    });
+    for (const record of records) {
+      const payload = (record.payload ?? {}) as Record<string, unknown>;
+      if (
+        typeof payload.sourceUrl === 'string' &&
+        payload.sourceUrl === sourceUrl
+      ) {
+        return this.mapToRecord(record);
+      }
+    }
+    return null;
+  }
+
   async listFailedJobsSince(days: number): Promise<JobRecord[]> {
     const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const records = await this.prismaService.job.findMany({
@@ -116,6 +177,7 @@ export class JobsService {
     status: string;
     createdAt: Date;
     updatedAt: Date;
+    userId?: string | null;
     payload: Prisma.JsonValue;
     result: Prisma.JsonValue | null;
     error: string | null;
@@ -126,6 +188,7 @@ export class JobsService {
       status: item.status as JobStatus,
       createdAt: item.createdAt.toISOString(),
       updatedAt: item.updatedAt.toISOString(),
+      userId: item.userId ?? null,
       payload: (item.payload ?? {}) as Record<string, unknown>,
       result: (item.result ?? undefined) as Record<string, unknown> | undefined,
       error: item.error ?? undefined,

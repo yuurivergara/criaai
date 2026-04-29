@@ -13,6 +13,8 @@ export interface JobRecord {
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
+  /** Owner of the job. null for legacy rows + system-internal jobs. */
+  userId?: string | null;
   payload: Record<string, unknown>;
   result?: Record<string, unknown>;
   error?: string;

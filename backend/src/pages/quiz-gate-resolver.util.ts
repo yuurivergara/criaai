@@ -232,13 +232,16 @@ export const QUIZ_GATE_RESOLVER_BROWSER_JS = String.raw`
     const min = parseFloat(el.getAttribute('min') || 'NaN');
     const max = parseFloat(el.getAttribute('max') || 'NaN');
 
-    // Hard type-based shortcuts.
-    if (type === 'email')                                return { value: 'teste@criaai.local',   ruleId: 'email' };
-    if (type === 'tel')                                  return { value: '+5511999999999',       ruleId: 'phone' };
-    if (type === 'date')                                 return { value: '2000-01-01',           ruleId: 'date' };
-    if (type === 'url')                                  return { value: 'https://criaai.local', ruleId: 'url' };
-    if (type === 'color')                                return { value: '#222222',              ruleId: 'color' };
-    if (type === 'password')                             return { value: 'Criaai!2025',          ruleId: 'password' };
+    // Hard type-based shortcuts. Values are chosen to satisfy the STRICTEST
+    // common validators (public-TLD email, valid check-digit CPF, real CEP,
+    // 11-digit BR mobile without country-code, etc.). Using reserved TLDs
+    // like ".local" gets rejected by many quiz frameworks.
+    if (type === 'email')                                return { value: 'criaai.tester@gmail.com', ruleId: 'email' };
+    if (type === 'tel')                                  return { value: '11987654321',             ruleId: 'phone' };
+    if (type === 'date')                                 return { value: '2000-01-01',              ruleId: 'date' };
+    if (type === 'url')                                  return { value: 'https://www.google.com',  ruleId: 'url' };
+    if (type === 'color')                                return { value: '#222222',                 ruleId: 'color' };
+    if (type === 'password')                             return { value: 'Criaai!2025',             ruleId: 'password' };
     if (type === 'range') {
       const mid = (!isNaN(min) && !isNaN(max)) ? (min + max) / 2 : 50;
       return { value: String(Math.round(mid)), ruleId: 'range' };
@@ -263,10 +266,12 @@ export const QUIZ_GATE_RESOLVER_BROWSER_JS = String.raw`
         return { value: '30', ruleId: 'age' };
       }
       if (/\b(cep|zip|postal)\b/.test(signal)) {
-        return { value: '01000000', ruleId: 'zip' };
+        // Real CEP of Av. Paulista — passes ViaCEP / Correios validation.
+        return { value: '01310100', ruleId: 'zip' };
       }
       if (/\b(cpf|dni|tax|ssn)\b/.test(signal)) {
-        return { value: '00000000000', ruleId: 'tax-id' };
+        // Valid CPF per BR modulo-11 check-digit algorithm.
+        return { value: '52998224725', ruleId: 'tax-id' };
       }
       // Generic numeric — respect min/max/maxlength.
       let guess = 1;
@@ -278,15 +283,22 @@ export const QUIZ_GATE_RESOLVER_BROWSER_JS = String.raw`
       return { value: String(guess), ruleId: 'generic-number' };
     }
 
-    // Text-like.
-    if (/\b(email|e-mail|correo)\b/.test(signal))                return { value: 'teste@criaai.local',   ruleId: 'email-text' };
-    if (/\b(phone|tel|whats|telefone|telef|celular|m[oó]vil)\b/.test(signal))
-                                                                 return { value: '+5511999999999',       ruleId: 'phone-text' };
+    // Text-like. Match email FIRST so an <input type="text" placeholder="email">
+    // doesn't fall through to "name" or "default".
+    if (/\b(email|e-mail|correo|correio|mail)\b/.test(signal))   return { value: 'criaai.tester@gmail.com', ruleId: 'email-text' };
+    if (/\b(phone|tel|whats|telefone|telef|celular|m[oó]vil|movil)\b/.test(signal))
+                                                                 return { value: '11987654321',            ruleId: 'phone-text' };
     if (/\b(nome|name|nombre|first|last|surname|apellido)\b/.test(signal))
-                                                                 return { value: 'Maria Silva',          ruleId: 'name' };
-    if (/\b(cep|zip|postal|codigo postal)\b/.test(signal))       return { value: '01000000',             ruleId: 'zip-text' };
-    if (/\b(cidade|city|ciudad)\b/.test(signal))                 return { value: 'São Paulo',            ruleId: 'city' };
-    if (/\b(cupom|coupon|discount|promo)\b/.test(signal))        return { value: '',                     ruleId: 'coupon-skip' };
+                                                                 return { value: 'Maria Silva',            ruleId: 'name' };
+    if (/\b(cep|zip|postal|codigo postal)\b/.test(signal))       return { value: '01310100',               ruleId: 'zip-text' };
+    if (/\b(cidade|city|ciudad)\b/.test(signal))                 return { value: 'São Paulo',              ruleId: 'city' };
+    if (/\b(cupom|coupon|discount|promo)\b/.test(signal))        return { value: '',                       ruleId: 'coupon-skip' };
+
+    // Safety-net for email — if the field has an "@" placeholder/pattern
+    // but no keyword matched (some sites just say "Ingresa tu correo" far
+    // from the input), still fill with a valid public email.
+    if (/@/.test(el.getAttribute('placeholder') || '') ||
+        /@/.test(el.getAttribute('pattern') || ''))              return { value: 'criaai.tester@gmail.com', ruleId: 'email-pattern' };
 
     // Fallback — "something reasonable".
     return { value: 'Criaai', ruleId: 'text-default' };

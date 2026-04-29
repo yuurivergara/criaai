@@ -8,6 +8,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// Application user (e-mail + password). Owns Pages, Jobs and CustomDomains.
+model User {
+  id           String   @id
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime
+  updatedAt    DateTime
+}
+
 model Job {
   id        String   @id
   type      String
@@ -15,8 +25,12 @@ model Job {
   payload   Json
   result    Json?
   error     String?
+  /// Owner of the job. Nullable for legacy rows + worker-internal jobs.
+  userId    String?
   createdAt DateTime
   updatedAt DateTime
+
+  @@index([userId])
 }
 
 model Page {
@@ -28,8 +42,12 @@ model Page {
   slug            String?  @unique
   publishedBundle Json?
   latestVersionId String?
+  /// Owner of the page. Nullable for legacy rows created before auth.
+  userId          String?
   createdAt       DateTime
   updatedAt       DateTime
+
+  @@index([userId])
 }
 
 model PageVersion {
@@ -41,4 +59,31 @@ model PageVersion {
   createdAt DateTime
 
   @@index([pageId])
+}
+
+/// Custom domain (e.g. "quiz.minhamarca.com") attached to a published Page.
+/// The middleware uses `host` to route incoming requests to the matching
+/// page bundle. Verification is done via a one-time TXT record so we know
+/// the user actually owns the domain before serving content under it.
+model CustomDomain {
+  id                String    @id
+  pageId            String
+  /// Lowercase hostname (no scheme/port). Unique across the system.
+  host              String    @unique
+  /// Random token the user must publish as TXT _criaai-verify.<host>.
+  verificationToken String
+  /// pending | verified | active | error
+  status            String
+  /// Filled after successful TXT lookup.
+  verifiedAt        DateTime?
+  /// Last verification attempt outcome (success or error message).
+  lastCheckedAt     DateTime?
+  lastCheckMessage  String?
+  /// Optional friendly label shown in the UI.
+  label             String?
+  createdAt         DateTime
+  updatedAt         DateTime
+
+  @@index([pageId])
+  @@index([status])
 }

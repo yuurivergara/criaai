@@ -15,10 +15,7 @@
  * across customers.
  */
 
-export type LayoutVariant =
-  | 'vsl-hero'
-  | 'story-driven'
-  | 'authority-led';
+export type LayoutVariant = 'vsl-hero' | 'story-driven' | 'authority-led';
 
 export type ToneKey =
   | 'confident'

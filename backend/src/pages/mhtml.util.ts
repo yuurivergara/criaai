@@ -26,9 +26,7 @@ function parseHeaders(block: string): Record<string, string> {
 }
 
 function extractBoundary(contentType: string): string | null {
-  const match = contentType.match(
-    /boundary\s*=\s*(?:"([^"]+)"|([^\s;]+))/i,
-  );
+  const match = contentType.match(/boundary\s*=\s*(?:"([^"]+)"|([^\s;]+))/i);
   if (!match) return null;
   return match[1] ?? match[2] ?? null;
 }
@@ -98,7 +96,8 @@ export function parseMhtml(mhtml: string): ParsedMhtml | null {
 }
 
 function toDataUri(part: MhtmlPart): string {
-  const mime = part.contentType.split(';')[0].trim() || 'application/octet-stream';
+  const mime =
+    part.contentType.split(';')[0].trim() || 'application/octet-stream';
   return `data:${mime};base64,${part.body.toString('base64')}`;
 }
 
@@ -175,8 +174,9 @@ function findRootHtmlPart(parsed: ParsedMhtml): MhtmlPart | null {
     if (hit && hit.contentType.includes('text/html')) return hit;
   }
   return (
-    parsed.parts.find((p) => p.contentType.toLowerCase().includes('text/html')) ??
-    null
+    parsed.parts.find((p) =>
+      p.contentType.toLowerCase().includes('text/html'),
+    ) ?? null
   );
 }
 

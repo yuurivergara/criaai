@@ -121,6 +121,15 @@ exports.Prisma.TransactionIsolationLevel = makeStrictEnum({
   Serializable: 'Serializable'
 });
 
+exports.Prisma.UserScalarFieldEnum = {
+  id: 'id',
+  email: 'email',
+  passwordHash: 'passwordHash',
+  name: 'name',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
 exports.Prisma.JobScalarFieldEnum = {
   id: 'id',
   type: 'type',
@@ -128,6 +137,7 @@ exports.Prisma.JobScalarFieldEnum = {
   payload: 'payload',
   result: 'result',
   error: 'error',
+  userId: 'userId',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
 };
@@ -141,6 +151,7 @@ exports.Prisma.PageScalarFieldEnum = {
   slug: 'slug',
   publishedBundle: 'publishedBundle',
   latestVersionId: 'latestVersionId',
+  userId: 'userId',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
 };
@@ -152,6 +163,20 @@ exports.Prisma.PageVersionScalarFieldEnum = {
   html: 'html',
   meta: 'meta',
   createdAt: 'createdAt'
+};
+
+exports.Prisma.CustomDomainScalarFieldEnum = {
+  id: 'id',
+  pageId: 'pageId',
+  host: 'host',
+  verificationToken: 'verificationToken',
+  status: 'status',
+  verifiedAt: 'verifiedAt',
+  lastCheckedAt: 'lastCheckedAt',
+  lastCheckMessage: 'lastCheckMessage',
+  label: 'label',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
 };
 
 exports.Prisma.SortOrder = {
@@ -173,22 +198,24 @@ exports.Prisma.QueryMode = {
   insensitive: 'insensitive'
 };
 
+exports.Prisma.NullsOrder = {
+  first: 'first',
+  last: 'last'
+};
+
 exports.Prisma.JsonNullValueFilter = {
   DbNull: Prisma.DbNull,
   JsonNull: Prisma.JsonNull,
   AnyNull: Prisma.AnyNull
 };
 
-exports.Prisma.NullsOrder = {
-  first: 'first',
-  last: 'last'
-};
-
 
 exports.Prisma.ModelName = {
+  User: 'User',
   Job: 'Job',
   Page: 'Page',
-  PageVersion: 'PageVersion'
+  PageVersion: 'PageVersion',
+  CustomDomain: 'CustomDomain'
 };
 
 /**

@@ -30,6 +30,22 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const queueConcurrency = Number(
+      this.configService.get('QUEUE_CONCURRENCY') ?? 2,
+    );
+    const lockDurationMs = Number(
+      this.configService.get('QUEUE_LOCK_DURATION_MS') ?? 10 * 60 * 1000,
+    );
+    const lockRenewMs = Number(
+      this.configService.get('QUEUE_LOCK_RENEW_MS') ?? 30 * 1000,
+    );
+    const stalledIntervalMs = Number(
+      this.configService.get('QUEUE_STALLED_INTERVAL_MS') ?? 60 * 1000,
+    );
+    const maxStalledCount = Number(
+      this.configService.get('QUEUE_MAX_STALLED_COUNT') ?? 1,
+    );
+
     this.redis = new IORedis(redisUrl, {
       maxRetriesPerRequest: null,
       enableReadyCheck: true,
@@ -39,7 +55,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       connection: this.redis,
       defaultJobOptions: {
         removeOnComplete: true,
-        attempts: 3,
+        attempts: 2,
         backoff: { type: 'exponential', delay: 500 },
       },
     });
@@ -55,7 +71,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       },
       {
         connection: this.redis,
-        concurrency: Number(this.configService.get('QUEUE_CONCURRENCY') ?? 10),
+        concurrency: queueConcurrency,
+        lockDuration: lockDurationMs,
+        lockRenewTime: lockRenewMs,
+        stalledInterval: stalledIntervalMs,
+        maxStalledCount,
       },
     );
 
@@ -92,5 +112,31 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     queueMicrotask(() => {
       void handler(payload);
     });
+  }
+
+  /**
+   * Reserve a short-lived dedup window for `key`. Returns `true` if the
+   * caller "won" the slot (no recent identical job) and `false` if the
+   * key was already claimed within the TTL.
+   *
+   * Backed by Redis when available (`SET … NX EX`); when Redis is not
+   * configured (e.g. dev / tests) the dedup is silently a no-op so the
+   * single-process queue still works.
+   */
+  async tryClaimDedup(key: string, ttlSeconds: number): Promise<boolean> {
+    if (!this.redis) {
+      return true;
+    }
+    try {
+      const result = await this.redis.set(key, '1', 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    } catch (error) {
+      this.logger.warn(
+        `dedup claim failed for key=${key}: ${
+          error instanceof Error ? error.message : 'unknown'
+        }`,
+      );
+      return true;
+    }
   }
 }

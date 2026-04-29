@@ -146,7 +146,10 @@ export class SalesPageGeneratorService {
       typographyPreference: input.typographyPreference,
     });
 
-    const userPrompt = this.buildUserPrompt({ ...input, tone, language }, design);
+    const userPrompt = this.buildUserPrompt(
+      { ...input, tone, language },
+      design,
+    );
 
     let copy: SalesPageCopy | null = null;
     let provider: 'ollama' | 'template-fallback' = 'template-fallback';
@@ -228,17 +231,22 @@ export class SalesPageGeneratorService {
     const lines: string[] = [];
     lines.push(`Language: ${input.language}`);
     lines.push(`Tone: ${input.tone}`);
-    lines.push(`Layout flavor: ${design.layout.id} (${design.layout.description})`);
+    lines.push(
+      `Layout flavor: ${design.layout.id} (${design.layout.description})`,
+    );
     if (input.productName) lines.push(`Product name: ${input.productName}`);
     if (input.niche) lines.push(`Niche: ${input.niche}`);
     if (input.audience) lines.push(`Audience: ${input.audience}`);
     if (input.promise) lines.push(`Main promise: ${input.promise}`);
     if (input.uniqueMechanism)
-      lines.push(`Unique mechanism (use this faithfully): ${input.uniqueMechanism}`);
+      lines.push(
+        `Unique mechanism (use this faithfully): ${input.uniqueMechanism}`,
+      );
     if (input.priceOffer) lines.push(`Price/offer line: ${input.priceOffer}`);
     if (input.guarantee) lines.push(`Guarantee: ${input.guarantee}`);
     if (input.cta) lines.push(`Preferred primary CTA wording: ${input.cta}`);
-    if (input.urgencyHook) lines.push(`Urgency/scarcity hook: ${input.urgencyHook}`);
+    if (input.urgencyHook)
+      lines.push(`Urgency/scarcity hook: ${input.urgencyHook}`);
     if (input.authorName || input.authorRole || input.authorBio) {
       lines.push('Author info:');
       if (input.authorName) lines.push(`  Name: ${input.authorName}`);
@@ -254,12 +262,16 @@ export class SalesPageGeneratorService {
       input.proofPoints.forEach((p) => lines.push(`  - ${p}`));
     }
     if (input.bonuses?.length) {
-      lines.push('Bonuses to include (expand into title + description + value):');
+      lines.push(
+        'Bonuses to include (expand into title + description + value):',
+      );
       input.bonuses.forEach((b) => lines.push(`  - ${b}`));
     }
     lines.push('Product description:');
     lines.push(input.prompt.trim());
-    lines.push('Return the JSON now. Do not include any text before or after the JSON object.');
+    lines.push(
+      'Return the JSON now. Do not include any text before or after the JSON object.',
+    );
     return lines.join('\n');
   }
 
@@ -543,17 +555,23 @@ export class SalesPageGeneratorService {
     return cleaned.length >= 3 ? cleaned.slice(0, 80) : null;
   }
 
-  private fallbackPack(
-    lang: LanguageKey,
-    input: SalesPageGenerateInput,
-  ) {
+  private fallbackPack(lang: LanguageKey, input: SalesPageGenerateInput) {
     const niche = input.niche ?? '';
     if (lang === 'en-US') {
       return {
-        kicker: niche ? `For people serious about ${niche}` : 'Built for real results',
-        headline: input.promise || (niche ? `The simplest path to ${niche}` : 'The direct path to the result you want'),
-        sub: input.audience ? `Built for ${input.audience}. Focused, practical, fully supported.` : 'Focused, practical, with the support of people who already walked the path.',
-        storyHook: 'Most programs leave you alone after day 1. Ours does the exact opposite.',
+        kicker: niche
+          ? `For people serious about ${niche}`
+          : 'Built for real results',
+        headline:
+          input.promise ||
+          (niche
+            ? `The simplest path to ${niche}`
+            : 'The direct path to the result you want'),
+        sub: input.audience
+          ? `Built for ${input.audience}. Focused, practical, fully supported.`
+          : 'Focused, practical, with the support of people who already walked the path.',
+        storyHook:
+          'Most programs leave you alone after day 1. Ours does the exact opposite.',
         cta: 'Get instant access',
         pain: [
           'You have tried everything and nothing delivered what it promised.',
@@ -566,21 +584,42 @@ export class SalesPageGeneratorService {
         ],
         mechanismName: 'The 3-Phase Acceleration Method',
         mechanismNameFrom: (_s: string) => 'The Custom Acceleration Method',
-        mechanismDesc: 'A step-by-step system tested with hundreds of real cases. You skip the trial-and-error and go straight to what works.',
+        mechanismDesc:
+          'A step-by-step system tested with hundreds of real cases. You skip the trial-and-error and go straight to what works.',
         mechanismSteps: [
           'Diagnose: understand exactly where you are and what is blocking you.',
           'Rebuild: install the daily habits that move the needle for your case.',
           'Scale: leverage what works and compound results week over week.',
         ],
         benefits: [
-          { title: 'Step-by-step plan', description: 'A clear path, no fluff, no theory bloat.' },
-          { title: 'Human support', description: 'Fast, specific answers for your exact situation.' },
-          { title: 'Results in weeks', description: 'Focus on what moves the needle — nothing else.' },
-          { title: 'Always up to date', description: 'You grow alongside the program.' },
+          {
+            title: 'Step-by-step plan',
+            description: 'A clear path, no fluff, no theory bloat.',
+          },
+          {
+            title: 'Human support',
+            description: 'Fast, specific answers for your exact situation.',
+          },
+          {
+            title: 'Results in weeks',
+            description: 'Focus on what moves the needle — nothing else.',
+          },
+          {
+            title: 'Always up to date',
+            description: 'You grow alongside the program.',
+          },
         ],
         bonuses: [
-          { title: 'Private accountability community', description: 'Daily check-ins and peer support.', valueLine: 'Value: $297' },
-          { title: 'Monthly live Q&A', description: 'Direct access to the lead mentor.', valueLine: 'Value: $497' },
+          {
+            title: 'Private accountability community',
+            description: 'Daily check-ins and peer support.',
+            valueLine: 'Value: $297',
+          },
+          {
+            title: 'Monthly live Q&A',
+            description: 'Direct access to the lead mentor.',
+            valueLine: 'Value: $497',
+          },
         ],
         bonusDefaultDesc: 'Included free when you join today.',
         bonusValueLine: 'Value included',
@@ -591,7 +630,8 @@ export class SalesPageGeneratorService {
         ],
         authorName: 'The Founders',
         authorRole: 'Lead mentors',
-        authorBio: 'Built from 10+ years of hands-on work, refined with every single cohort.',
+        authorBio:
+          'Built from 10+ years of hands-on work, refined with every single cohort.',
         credentials: [
           '10+ years of industry experience',
           'Taught in 20+ countries',
@@ -601,7 +641,8 @@ export class SalesPageGeneratorService {
           headline: 'Limited enrollment this week',
           body: 'We only open a few spots per month to keep the support quality high.',
         },
-        urgencyBody: 'We only open a few spots per month to keep the support quality high.',
+        urgencyBody:
+          'We only open a few spots per month to keep the support quality high.',
         offerTitle: 'Complete program access',
         price: 'Lifetime access · one-time payment',
         offerBullets: [
@@ -612,26 +653,69 @@ export class SalesPageGeneratorService {
         ],
         guarantee: '7-day unconditional guarantee',
         testimonials: [
-          { quote: 'In 30 days I shipped things I had been postponing for years.', author: 'Chris R.', role: 'Student', result: '+40% in the first month' },
-          { quote: 'The support is next level. Whenever I got stuck, someone unstuck me the same day.', author: 'Phil A.', role: 'Student', result: 'Finished in 6 weeks' },
-          { quote: 'Finally something that worked with my routine. No fluff, just clear steps.', author: 'Sam T.', role: 'Student', result: '3x faster than expected' },
+          {
+            quote:
+              'In 30 days I shipped things I had been postponing for years.',
+            author: 'Chris R.',
+            role: 'Student',
+            result: '+40% in the first month',
+          },
+          {
+            quote:
+              'The support is next level. Whenever I got stuck, someone unstuck me the same day.',
+            author: 'Phil A.',
+            role: 'Student',
+            result: 'Finished in 6 weeks',
+          },
+          {
+            quote:
+              'Finally something that worked with my routine. No fluff, just clear steps.',
+            author: 'Sam T.',
+            role: 'Student',
+            result: '3x faster than expected',
+          },
         ],
         faq: [
-          { question: 'How fast will I see results?', answer: 'Students who apply the method usually notice changes in the first weeks.' },
-          { question: 'Will it work for my specific case?', answer: 'Yes. The method is adaptable, and you get support to fit it to your context.' },
-          { question: 'How does the guarantee work?', answer: 'You have 7 days to try risk-free. Not happy? 100% refund.' },
-          { question: 'Do I need experience?', answer: 'No. The program is built so beginners can follow along.' },
+          {
+            question: 'How fast will I see results?',
+            answer:
+              'Students who apply the method usually notice changes in the first weeks.',
+          },
+          {
+            question: 'Will it work for my specific case?',
+            answer:
+              'Yes. The method is adaptable, and you get support to fit it to your context.',
+          },
+          {
+            question: 'How does the guarantee work?',
+            answer: 'You have 7 days to try risk-free. Not happy? 100% refund.',
+          },
+          {
+            question: 'Do I need experience?',
+            answer: 'No. The program is built so beginners can follow along.',
+          },
         ],
-        fallbackFaqAnswer: 'Yes — we cover exactly this in the program, and support is available if you get stuck.',
-        footer: 'This site is not affiliated with Facebook or any other entity.',
+        fallbackFaqAnswer:
+          'Yes — we cover exactly this in the program, and support is available if you get stuck.',
+        footer:
+          'This site is not affiliated with Facebook or any other entity.',
       };
     }
     if (lang === 'es-ES') {
       return {
-        kicker: niche ? `Para quienes van en serio con ${niche}` : 'Hecho para resultados reales',
-        headline: input.promise || (niche ? `El camino más simple para ${niche}` : 'El camino directo al resultado que buscas'),
-        sub: input.audience ? `Creado para ${input.audience}. Directo, práctico y con acompañamiento.` : 'Directo, práctico y con el respaldo de quienes ya hicieron el camino.',
-        storyHook: 'La mayoría de los programas te dejan solo después del primer día. El nuestro hace exactamente lo contrario.',
+        kicker: niche
+          ? `Para quienes van en serio con ${niche}`
+          : 'Hecho para resultados reales',
+        headline:
+          input.promise ||
+          (niche
+            ? `El camino más simple para ${niche}`
+            : 'El camino directo al resultado que buscas'),
+        sub: input.audience
+          ? `Creado para ${input.audience}. Directo, práctico y con acompañamiento.`
+          : 'Directo, práctico y con el respaldo de quienes ya hicieron el camino.',
+        storyHook:
+          'La mayoría de los programas te dejan solo después del primer día. El nuestro hace exactamente lo contrario.',
         cta: 'Quiero comprar ahora',
         pain: [
           'Has probado de todo y nada entrega lo que promete.',
@@ -644,21 +728,42 @@ export class SalesPageGeneratorService {
         ],
         mechanismName: 'Método de Aceleración en 3 Fases',
         mechanismNameFrom: () => 'Método a Medida',
-        mechanismDesc: 'Un sistema paso a paso probado en cientos de casos reales. Te saltas el ensayo y error y vas directo a lo que funciona.',
+        mechanismDesc:
+          'Un sistema paso a paso probado en cientos de casos reales. Te saltas el ensayo y error y vas directo a lo que funciona.',
         mechanismSteps: [
           'Diagnóstico: entiende exactamente dónde estás y qué te bloquea.',
           'Reconstrucción: instala los hábitos diarios que mueven la aguja en tu caso.',
           'Escala: amplifica lo que funciona y multiplica resultados.',
         ],
         benefits: [
-          { title: 'Plan paso a paso', description: 'Un camino claro, sin relleno.' },
-          { title: 'Soporte humano', description: 'Respuestas rápidas y específicas para tu caso.' },
-          { title: 'Resultados en semanas', description: 'Enfoque en lo que mueve la aguja.' },
-          { title: 'Siempre actualizado', description: 'Creces junto al programa.' },
+          {
+            title: 'Plan paso a paso',
+            description: 'Un camino claro, sin relleno.',
+          },
+          {
+            title: 'Soporte humano',
+            description: 'Respuestas rápidas y específicas para tu caso.',
+          },
+          {
+            title: 'Resultados en semanas',
+            description: 'Enfoque en lo que mueve la aguja.',
+          },
+          {
+            title: 'Siempre actualizado',
+            description: 'Creces junto al programa.',
+          },
         ],
         bonuses: [
-          { title: 'Comunidad privada de responsabilidad', description: 'Check-ins diarios y apoyo entre pares.', valueLine: 'Valor: U$S 297' },
-          { title: 'Q&A en vivo mensual', description: 'Acceso directo al mentor principal.', valueLine: 'Valor: U$S 497' },
+          {
+            title: 'Comunidad privada de responsabilidad',
+            description: 'Check-ins diarios y apoyo entre pares.',
+            valueLine: 'Valor: U$S 297',
+          },
+          {
+            title: 'Q&A en vivo mensual',
+            description: 'Acceso directo al mentor principal.',
+            valueLine: 'Valor: U$S 497',
+          },
         ],
         bonusDefaultDesc: 'Incluido gratis al inscribirte hoy.',
         bonusValueLine: 'Valor incluido',
@@ -669,7 +774,8 @@ export class SalesPageGeneratorService {
         ],
         authorName: 'Los Fundadores',
         authorRole: 'Mentores principales',
-        authorBio: 'Construido con más de 10 años de experiencia práctica, refinado con cada promoción.',
+        authorBio:
+          'Construido con más de 10 años de experiencia práctica, refinado con cada promoción.',
         credentials: [
           'Más de 10 años de experiencia',
           'Alumnos en más de 20 países',
@@ -679,7 +785,8 @@ export class SalesPageGeneratorService {
           headline: 'Inscripción limitada esta semana',
           body: 'Abrimos pocos cupos al mes para mantener la calidad del soporte.',
         },
-        urgencyBody: 'Abrimos pocos cupos al mes para mantener la calidad del soporte.',
+        urgencyBody:
+          'Abrimos pocos cupos al mes para mantener la calidad del soporte.',
         offerTitle: 'Acceso completo al programa',
         price: 'Acceso de por vida · pago único',
         offerBullets: [
@@ -690,26 +797,70 @@ export class SalesPageGeneratorService {
         ],
         guarantee: '7 días de garantía incondicional',
         testimonials: [
-          { quote: 'En 30 días logré cosas que venía postergando hace años.', author: 'Carla R.', role: 'Alumna', result: '+40% el primer mes' },
-          { quote: 'El soporte es otro nivel. Siempre que me trababa, alguien me ayudaba el mismo día.', author: 'Felipe A.', role: 'Alumno', result: 'Terminado en 6 semanas' },
-          { quote: 'Por fin algo que encajó con mi rutina. Sin relleno, pasos claros.', author: 'Sol T.', role: 'Alumna', result: '3x más rápido' },
+          {
+            quote: 'En 30 días logré cosas que venía postergando hace años.',
+            author: 'Carla R.',
+            role: 'Alumna',
+            result: '+40% el primer mes',
+          },
+          {
+            quote:
+              'El soporte es otro nivel. Siempre que me trababa, alguien me ayudaba el mismo día.',
+            author: 'Felipe A.',
+            role: 'Alumno',
+            result: 'Terminado en 6 semanas',
+          },
+          {
+            quote:
+              'Por fin algo que encajó con mi rutina. Sin relleno, pasos claros.',
+            author: 'Sol T.',
+            role: 'Alumna',
+            result: '3x más rápido',
+          },
         ],
         faq: [
-          { question: '¿En cuánto tiempo veo resultados?', answer: 'Los alumnos que aplican el método suelen notar cambios en las primeras semanas.' },
-          { question: '¿Funciona para mi caso?', answer: 'Sí. El método se adapta y tienes soporte para ajustarlo a tu contexto.' },
-          { question: '¿Cómo funciona la garantía?', answer: 'Tienes 7 días para probar sin riesgo. Si no te gusta, devolvemos el 100%.' },
-          { question: '¿Necesito experiencia?', answer: 'No. El programa está pensado para que principiantes lo sigan sin problema.' },
+          {
+            question: '¿En cuánto tiempo veo resultados?',
+            answer:
+              'Los alumnos que aplican el método suelen notar cambios en las primeras semanas.',
+          },
+          {
+            question: '¿Funciona para mi caso?',
+            answer:
+              'Sí. El método se adapta y tienes soporte para ajustarlo a tu contexto.',
+          },
+          {
+            question: '¿Cómo funciona la garantía?',
+            answer:
+              'Tienes 7 días para probar sin riesgo. Si no te gusta, devolvemos el 100%.',
+          },
+          {
+            question: '¿Necesito experiencia?',
+            answer:
+              'No. El programa está pensado para que principiantes lo sigan sin problema.',
+          },
         ],
-        fallbackFaqAnswer: 'Sí — lo cubrimos exactamente en el programa, y hay soporte disponible si te trabas.',
-        footer: 'Este sitio no está afiliado a Facebook ni a ninguna otra entidad.',
+        fallbackFaqAnswer:
+          'Sí — lo cubrimos exactamente en el programa, y hay soporte disponible si te trabas.',
+        footer:
+          'Este sitio no está afiliado a Facebook ni a ninguna otra entidad.',
       };
     }
     // pt-BR
     return {
-      kicker: niche ? `Para quem quer ${niche} de verdade` : 'Feito pra quem busca resultado real',
-      headline: input.promise || (niche ? `O caminho mais simples para ${niche}` : 'O caminho mais direto até o resultado que você quer'),
-      sub: input.audience ? `Um programa pensado para ${input.audience}. Direto ao ponto, prático e com suporte de quem já trilhou.` : 'Direto ao ponto, prático e com suporte de quem já trilhou o caminho.',
-      storyHook: 'A maioria dos programas te abandona depois do primeiro dia. O nosso faz exatamente o oposto.',
+      kicker: niche
+        ? `Para quem quer ${niche} de verdade`
+        : 'Feito pra quem busca resultado real',
+      headline:
+        input.promise ||
+        (niche
+          ? `O caminho mais simples para ${niche}`
+          : 'O caminho mais direto até o resultado que você quer'),
+      sub: input.audience
+        ? `Um programa pensado para ${input.audience}. Direto ao ponto, prático e com suporte de quem já trilhou.`
+        : 'Direto ao ponto, prático e com suporte de quem já trilhou o caminho.',
+      storyHook:
+        'A maioria dos programas te abandona depois do primeiro dia. O nosso faz exatamente o oposto.',
       cta: 'Quero garantir meu acesso',
       pain: [
         'Você já tentou de tudo e nada entrega o resultado prometido.',
@@ -722,21 +873,42 @@ export class SalesPageGeneratorService {
       ],
       mechanismName: 'Método de Aceleração em 3 Fases',
       mechanismNameFrom: () => 'Método Sob Medida',
-      mechanismDesc: 'Um sistema passo a passo testado em centenas de casos reais. Você pula o tentativa-e-erro e vai direto pro que funciona.',
+      mechanismDesc:
+        'Um sistema passo a passo testado em centenas de casos reais. Você pula o tentativa-e-erro e vai direto pro que funciona.',
       mechanismSteps: [
         'Diagnóstico: entender exatamente onde você está e o que te trava.',
         'Reconstrução: instalar os hábitos diários que movem o ponteiro no seu caso.',
         'Escala: amplificar o que funciona e multiplicar resultados semana após semana.',
       ],
       benefits: [
-        { title: 'Plano passo a passo', description: 'Um caminho claro, sem volta, sem teoria demais.' },
-        { title: 'Suporte humano', description: 'Respostas rápidas e específicas pra sua realidade.' },
-        { title: 'Resultados em poucas semanas', description: 'Foco no que move o ponteiro, sem encheção de linguiça.' },
-        { title: 'Atualizações contínuas', description: 'Você evolui junto com o programa.' },
+        {
+          title: 'Plano passo a passo',
+          description: 'Um caminho claro, sem volta, sem teoria demais.',
+        },
+        {
+          title: 'Suporte humano',
+          description: 'Respostas rápidas e específicas pra sua realidade.',
+        },
+        {
+          title: 'Resultados em poucas semanas',
+          description: 'Foco no que move o ponteiro, sem encheção de linguiça.',
+        },
+        {
+          title: 'Atualizações contínuas',
+          description: 'Você evolui junto com o programa.',
+        },
       ],
       bonuses: [
-        { title: 'Comunidade privada de responsabilidade', description: 'Check-ins diários e apoio dos colegas.', valueLine: 'Valor: R$ 497' },
-        { title: 'Q&A ao vivo mensal', description: 'Acesso direto ao mentor principal.', valueLine: 'Valor: R$ 997' },
+        {
+          title: 'Comunidade privada de responsabilidade',
+          description: 'Check-ins diários e apoio dos colegas.',
+          valueLine: 'Valor: R$ 497',
+        },
+        {
+          title: 'Q&A ao vivo mensal',
+          description: 'Acesso direto ao mentor principal.',
+          valueLine: 'Valor: R$ 997',
+        },
       ],
       bonusDefaultDesc: 'Incluso gratuitamente ao se inscrever hoje.',
       bonusValueLine: 'Valor incluso',
@@ -747,7 +919,8 @@ export class SalesPageGeneratorService {
       ],
       authorName: 'Os Fundadores',
       authorRole: 'Mentores principais',
-      authorBio: 'Construído com mais de 10 anos de experiência prática, refinado com cada turma.',
+      authorBio:
+        'Construído com mais de 10 anos de experiência prática, refinado com cada turma.',
       credentials: [
         '10+ anos de experiência na área',
         'Alunos em mais de 20 países',
@@ -757,7 +930,8 @@ export class SalesPageGeneratorService {
         headline: 'Inscrições limitadas nesta semana',
         body: 'Abrimos poucas vagas por mês pra manter a qualidade do suporte.',
       },
-      urgencyBody: 'Abrimos poucas vagas por mês pra manter a qualidade do suporte.',
+      urgencyBody:
+        'Abrimos poucas vagas por mês pra manter a qualidade do suporte.',
       offerTitle: 'Acesso completo ao programa',
       price: 'Acesso vitalício · pagamento único',
       offerBullets: [
@@ -768,18 +942,54 @@ export class SalesPageGeneratorService {
       ],
       guarantee: '7 dias de garantia incondicional',
       testimonials: [
-        { quote: 'Em 30 dias, coisas que eu vinha empurrando há anos finalmente saíram do papel.', author: 'Camila R.', role: 'Aluna', result: '+40% no primeiro mês' },
-        { quote: 'O suporte é outro nível. Sempre que travava, alguém me tirava do buraco no mesmo dia.', author: 'Felipe A.', role: 'Aluno', result: 'Concluído em 6 semanas' },
-        { quote: 'Finalmente algo que funcionou com a minha rotina. Sem enrolação, passo a passo claro.', author: 'Marina T.', role: 'Aluna', result: '3x mais rápido que o esperado' },
+        {
+          quote:
+            'Em 30 dias, coisas que eu vinha empurrando há anos finalmente saíram do papel.',
+          author: 'Camila R.',
+          role: 'Aluna',
+          result: '+40% no primeiro mês',
+        },
+        {
+          quote:
+            'O suporte é outro nível. Sempre que travava, alguém me tirava do buraco no mesmo dia.',
+          author: 'Felipe A.',
+          role: 'Aluno',
+          result: 'Concluído em 6 semanas',
+        },
+        {
+          quote:
+            'Finalmente algo que funcionou com a minha rotina. Sem enrolação, passo a passo claro.',
+          author: 'Marina T.',
+          role: 'Aluna',
+          result: '3x mais rápido que o esperado',
+        },
       ],
       faq: [
-        { question: 'Em quanto tempo começo a ver resultados?', answer: 'Alunos que aplicam de fato costumam notar mudanças nas primeiras semanas.' },
-        { question: 'Serve pro meu caso específico?', answer: 'Sim. O método é adaptável — e você tem suporte pra calibrar ao seu contexto.' },
-        { question: 'Como funciona a garantia?', answer: 'Você tem 7 dias para testar sem risco. Se não gostar, devolvemos 100% do valor.' },
-        { question: 'Preciso de experiência?', answer: 'Não. O programa foi feito pra que iniciantes consigam acompanhar.' },
+        {
+          question: 'Em quanto tempo começo a ver resultados?',
+          answer:
+            'Alunos que aplicam de fato costumam notar mudanças nas primeiras semanas.',
+        },
+        {
+          question: 'Serve pro meu caso específico?',
+          answer:
+            'Sim. O método é adaptável — e você tem suporte pra calibrar ao seu contexto.',
+        },
+        {
+          question: 'Como funciona a garantia?',
+          answer:
+            'Você tem 7 dias para testar sem risco. Se não gostar, devolvemos 100% do valor.',
+        },
+        {
+          question: 'Preciso de experiência?',
+          answer:
+            'Não. O programa foi feito pra que iniciantes consigam acompanhar.',
+        },
       ],
-      fallbackFaqAnswer: 'Sim — cobrimos exatamente isso dentro do programa, e você tem suporte quando travar.',
-      footer: 'Este site não é afiliado ao Facebook ou a qualquer outra entidade.',
+      fallbackFaqAnswer:
+        'Sim — cobrimos exatamente isso dentro do programa, e você tem suporte quando travar.',
+      footer:
+        'Este site não é afiliado ao Facebook ou a qualquer outra entidade.',
     };
   }
 }

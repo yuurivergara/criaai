@@ -47,10 +47,28 @@ export class ClonePageDto {
   quizMaxForks?: number;
 
   /**
+   * Maximum number of fork walkers running in parallel for this clone.
+   * Lower values reduce Chromium memory spikes on constrained machines.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(6)
+  quizConcurrentForks?: number;
+
+  /**
    * When true (default), classifier-ambiguous buttons are cross-checked with
    * the local Ollama LLM; a heuristic fallback is used when Ollama is down.
    */
   @IsOptional()
   @IsBoolean()
   useLlmAssist?: boolean;
+
+  /**
+   * Replace drag rulers / fake sliders with a plain text field during clone.
+   * Defaults to true — set false only when you need the raw DOM verbatim.
+   */
+  @IsOptional()
+  @IsBoolean()
+  simplifyInteractiveWidgets?: boolean;
 }

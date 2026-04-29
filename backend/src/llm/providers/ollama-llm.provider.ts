@@ -28,7 +28,7 @@ export class OllamaLlmProvider implements LlmProvider {
 
   get model(): string {
     return (
-      this.configService.get<string>('OLLAMA_MODEL') ?? 'qwen2.5:7b-instruct'
+      this.configService.get<string>('OLLAMA_MODEL') ?? 'qwen2.5:3b-instruct'
     );
   }
 

@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { QueueModule } from './queue/queue.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { GamificationModule } from './gamification/gamification.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { GamificationModule } from './gamification/gamification.module';
       isGlobal: true,
     }),
     PrismaModule,
+    AuthModule,
     QueueModule,
     RealtimeModule,
     HealthModule,

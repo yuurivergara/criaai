@@ -64,10 +64,10 @@ export function injectStableIdsOnCheerio($: CheerioAPI): void {
   const interactiveSet = new Set<CheerioElement>();
 
   $(EDITABLE_SELECTOR).each((_, el) => {
-    editableSet.add(el as CheerioElement);
+    editableSet.add(el);
   });
   $(INTERACTIVE_SELECTOR).each((_, el) => {
-    interactiveSet.add(el as CheerioElement);
+    interactiveSet.add(el);
   });
 
   const assigned = new Set<string>();
@@ -222,7 +222,7 @@ function isSemanticCheerio(
   $: CheerioAPI,
   el: Cheerio<CheerioElement>,
 ): boolean {
-  const node = el.get(0) as CheerioElement | undefined;
+  const node = el.get(0);
   if (!node || !node.tagName) return false;
   const tag = node.tagName.toLowerCase();
   if (SEMANTIC_TAGS.has(tag)) return true;
@@ -246,7 +246,7 @@ export function normalizeForSignature(raw: string | null | undefined): string {
 }
 
 function semanticHintCheerio(el: Cheerio<CheerioElement>): string {
-  const node = el.get(0) as CheerioElement | undefined;
+  const node = el.get(0);
   const tag = node?.tagName?.toLowerCase() ?? '';
   const hint =
     el.attr('data-testid') ??
@@ -259,13 +259,14 @@ function semanticHintCheerio(el: Cheerio<CheerioElement>): string {
 }
 
 function sameSemanticIndexCheerio(el: Cheerio<CheerioElement>): number {
-  const node = el.get(0) as CheerioElement | undefined;
+  const node = el.get(0);
   if (!node) return 0;
   const parent = el.parent();
   if (!parent.length) return 0;
-  const siblings = (parent.children().toArray() as CheerioElement[]).filter(
-    (c) => c.tagName === node.tagName,
-  );
+  const siblings = parent
+    .children()
+    .toArray()
+    .filter((c) => c.tagName === node.tagName);
   const idx = siblings.indexOf(node);
   return idx < 0 ? 0 : idx;
 }
@@ -279,7 +280,7 @@ function buildCheerioSignature(
   let cur: Cheerio<CheerioElement> = el.parent();
   let depth = 0;
   while (cur.length && depth < 40) {
-    const node = cur.get(0) as CheerioElement | undefined;
+    const node = cur.get(0);
     if (!node || !node.tagName) break;
     const tag = node.tagName.toLowerCase();
     if (tag === 'html' || tag === 'body') break;
@@ -291,8 +292,7 @@ function buildCheerioSignature(
     depth += 1;
   }
   const selfIdx = sameSemanticIndexCheerio(el);
-  const tagName =
-    (el.get(0) as CheerioElement | undefined)?.tagName?.toLowerCase() ?? '';
+  const tagName = el.get(0)?.tagName?.toLowerCase() ?? '';
   const hint = semanticHintCheerio(el);
   const rawLabel =
     el.text() ||
