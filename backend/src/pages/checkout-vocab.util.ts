@@ -39,7 +39,10 @@ export const CHECKOUT_DOMAIN_PATTERNS: Array<{
   { regex: /cakto\.com|cakto\.app/i, provider: 'cakto' },
   // OnProfit payment host (InLead funnels: `data-href` on button). Distinct
   // from inlead.digital (quiz UI) which stays in `QUIZ_BUILDER_HOST_SUFFIXES`.
-  { regex: /pay\.onprofit|\.onprofit\.com|onprofit\.com\.br/i, provider: 'onprofit' },
+  {
+    regex: /pay\.onprofit|\.onprofit\.com|onprofit\.com\.br/i,
+    provider: 'onprofit',
+  },
   {
     regex: /mercadopago|mercadolivre\.com\/checkout/i,
     provider: 'mercadopago',
@@ -132,9 +135,14 @@ export function isLikelyGlobalMerchantPayUrl(raw: string): boolean {
   if (host.startsWith('pay.')) return true;
   if (/\.(pay|checkout|payments)\./.test(host) || host.startsWith('checkout.'))
     return true;
-  if (/(^|\/)(checkout|pay|payment|pagamento|comprar|buy|order)(\/|$|\?)/i.test(path))
+  if (
+    /(^|\/)(checkout|pay|payment|pagamento|comprar|buy|order)(\/|$|\?)/i.test(
+      path,
+    )
+  )
     return true;
-  if (/[?&](off|offer|checkout|payment|tid|pid|token)(=|%3d)/i.test(full)) return true;
+  if (/[?&](off|offer|checkout|payment|tid|pid|token)(=|%3d)/i.test(full))
+    return true;
   return false;
 }
 

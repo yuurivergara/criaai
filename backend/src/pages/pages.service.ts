@@ -343,15 +343,16 @@ export class PagesService implements OnModuleInit {
       { pageId, ...payload, __userId: userId ?? null },
       userId ?? null,
     );
-    await this.queueService.enqueue('pages.publish', {
-      jobId: job.id,
-      pageId,
-      data: payload as unknown as Record<string, unknown>,
-      userId: userId ?? null,
-    });
+    // Publicação roda no mesmo processo: não depende do worker BullMQ/Redis.
+    // Assim o job não fica preso em "pending" se a fila não estiver consumindo.
+    await this.processPublishJob(job.id, pageId, payload);
+    const final = await this.jobsService.getById(job.id);
+    const result = final.result as { publicUrl?: string } | undefined;
     return {
       jobId: job.id,
-      status: job.status,
+      status: final.status,
+      publicUrl: typeof result?.publicUrl === 'string' ? result.publicUrl : undefined,
+      error: final.error,
     };
   }
 
@@ -1269,6 +1270,44 @@ export class PagesService implements OnModuleInit {
         versionId = live?.latestVersionId ?? null;
       }
 
+      // Auto-publish so the clone is immediately shareable (same idea as generate).
+      let published: { slug: string; publicUrl: string } | null = null;
+      if (pageId) {
+        try {
+          let baseSlug = this.slugify(extracted.title || '');
+          const titleTrim = (extracted.title || '').trim();
+          const slugFromUrl = (): string => {
+            try {
+              const u = new URL(payload.sourceUrl);
+              const host = u.hostname.replace(/^www\./i, '');
+              const pathSeg = u.pathname
+                .split('/')
+                .filter(Boolean)
+                .slice(0, 2)
+                .join('-');
+              return (
+                this.slugify(pathSeg ? `${host}-${pathSeg}` : host) || 'clone'
+              );
+            } catch {
+              return 'clone';
+            }
+          };
+          if (!titleTrim || !baseSlug || baseSlug === 'sales') {
+            baseSlug = slugFromUrl();
+          }
+          published = await this.publishPageToSlug(pageId, baseSlug);
+          this.logger.log(
+            `[clone:${jobId}] auto-published slug=${published.slug} url=${published.publicUrl}`,
+          );
+        } catch (err) {
+          this.logger.warn(
+            `[clone:${jobId}] auto-publish failed: ${
+              err instanceof Error ? err.message : 'unknown'
+            }`,
+          );
+        }
+      }
+
       await hooks.onStage?.({
         jobId,
         pageId: pageId ?? undefined,
@@ -1281,6 +1320,8 @@ export class PagesService implements OnModuleInit {
           pageId,
           versionId,
           sourceUrl: payload.sourceUrl,
+          publicUrl: published?.publicUrl,
+          slug: published?.slug,
         },
       });
     } catch (error) {
@@ -1469,9 +1510,8 @@ export class PagesService implements OnModuleInit {
   }
 
   /**
-   * Publish a page inline (no queue). Used by the generate flow to auto-
-   * publish the freshly-created page to a unique public slug so the customer
-   * immediately has a shareable URL.
+   * Publish a page inline (no queue). Used by generate + clone completion to
+   * assign a unique public slug so the customer immediately has a shareable URL.
    *
    * Retries on slug collisions up to `maxAttempts` times by swapping the
    * random suffix — after that it bubbles the last error up.
