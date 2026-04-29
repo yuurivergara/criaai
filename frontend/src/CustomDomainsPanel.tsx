@@ -30,6 +30,8 @@ interface Props {
   readonly pageId: string;
   /** True when page has at least one publish — domains only make sense after publishing. */
   readonly isPublished: boolean;
+  /** Link público no domínio da CriaAI; permanece válido junto com domínios próprios. */
+  readonly platformPublicUrl?: string;
 }
 
 const STATUS_BADGE: Record<CustomDomainView['status'], { label: string; tone: string }> = {
@@ -44,7 +46,11 @@ const STATUS_BADGE: Record<CustomDomainView['status'], { label: string; tone: st
  * existing domains with verification instructions and a form to add new
  * ones. All network calls go to /v1/pages/:pageId/domains.
  */
-export function CustomDomainsPanel({ pageId, isPublished }: Props) {
+export function CustomDomainsPanel({
+  pageId,
+  isPublished,
+  platformPublicUrl,
+}: Props) {
   const { authFetch } = useAuth();
   const [domains, setDomains] = useState<CustomDomainView[]>([]);
   const [loading, setLoading] = useState(false);
@@ -177,6 +183,18 @@ export function CustomDomainsPanel({ pageId, isPublished }: Props) {
           </p>
         </div>
       </header>
+
+      {platformPublicUrl ? (
+        <div className="cd-platform-link">
+          <p className="cd-section-title">Link público CriaAI</p>
+          <p className="cd-muted">
+            Sempre disponível, mesmo com domínio próprio ativo.
+          </p>
+          <a href={platformPublicUrl} target="_blank" rel="noreferrer">
+            {platformPublicUrl}
+          </a>
+        </div>
+      ) : null}
 
       <form className="cd-form" onSubmit={handleAdd}>
         <div className="cd-form-row">

@@ -61,6 +61,10 @@ interface JobRecord {
 
 interface PageRecord {
   id: string;
+  status?: string;
+  slug?: string;
+  /** Link público permanente no domínio da CriaAI (`/v1/public/...`). */
+  publicUrl?: string;
   latestVersion?: {
     id: string;
     title: string;
@@ -759,6 +763,17 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
     );
   }, [job?.status, job?.result?.publicUrl]);
 
+  // Abrir pelo dashboard: a API já traz `publicUrl` / `slug` da publicação.
+  useEffect(() => {
+    if (!page?.publicUrl || page.status !== 'published') return;
+    setPublishState((prev) =>
+      prev.status === 'done' && prev.publicUrl === page.publicUrl
+        ? prev
+        : { status: 'done', publicUrl: page.publicUrl },
+    );
+    if (page.slug) setPublishSubdomain(page.slug);
+  }, [page?.publicUrl, page?.slug, page?.status]);
+
   useEffect(() => {
     const sourceHtml = page?.latestVersion?.html;
     if (!sourceHtml) {
@@ -870,7 +885,8 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
     if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(subdomain)) {
       setPublishState({
         status: 'error',
-        error: 'Subdomínio inválido: use letras minúsculas, números e hífen.',
+        error:
+          'Identificador inválido: use letras minúsculas, números e hífen (2–41 caracteres).',
       });
       return;
     }
@@ -2062,7 +2078,7 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
                 </div>
                 <div className="editor-modal-body">
                   <label className="editor-field">
-                    <span>Subdomínio</span>
+                    <span>Identificador na URL pública</span>
                     <div className="editor-publish-input">
                       <input
                         type="text"
@@ -2080,8 +2096,12 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
                           publishState.status === 'processing'
                         }
                       />
-                      <span>.criaai.app</span>
                     </div>
+                    <p className="editor-field-hint">
+                      Fica no link público da CriaAI (único por página). Você
+                      pode apontar um domínio próprio abaixo; o link CriaAI
+                      continua válido.
+                    </p>
                   </label>
                   {pendingCustomizations > 0 && (
                     <div className="editor-modal-warn">
@@ -2108,7 +2128,11 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
                       <div className="editor-modal-success">
                         <IconCheck />
                         <div>
-                          <strong>Publicado com sucesso</strong>
+                          <strong>Link público CriaAI</strong>
+                          <p className="editor-field-hint">
+                            Compartilhe este endereço ou use um domínio próprio
+                            em conjunto — os dois funcionam.
+                          </p>
                           <a
                             href={publishState.publicUrl}
                             target="_blank"
@@ -2122,6 +2146,11 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
                   <CustomDomainsPanel
                     pageId={page.id}
                     isPublished={publishState.status === 'done'}
+                    platformPublicUrl={
+                      publishState.status === 'done'
+                        ? publishState.publicUrl ?? page.publicUrl
+                        : undefined
+                    }
                   />
                 </div>
                 <div className="editor-modal-foot">
