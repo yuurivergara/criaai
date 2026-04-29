@@ -96,7 +96,14 @@ interface EditorPage {
 
 interface CloneStreamingState {
   active: boolean;
-  stage?: 'fetch' | 'crawl' | 'walk' | 'persist' | 'completed' | 'failed';
+  stage?:
+    | 'fetch'
+    | 'crawl'
+    | 'walk'
+    | 'persist'
+    | 'interactive'
+    | 'completed'
+    | 'failed';
   message?: string;
   percent?: number;
   /** stepId → freshly captured version awaiting user decision. */
