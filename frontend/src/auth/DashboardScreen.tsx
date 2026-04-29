@@ -161,6 +161,16 @@ export function DashboardScreen({ onOpenPage, onStartNew }: Props) {
                   </div>
                 </div>
                 <div className="dash-item-actions">
+                  {p.publicUrl ? (
+                    <a
+                      href={p.publicUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="dash-btn dash-btn-site"
+                    >
+                      Ver site
+                    </a>
+                  ) : null}
                   <button
                     type="button"
                     className="dash-btn dash-btn-primary"

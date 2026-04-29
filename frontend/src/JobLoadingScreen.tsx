@@ -781,6 +781,29 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
     if (page.slug) setPublishSubdomain(page.slug);
   }, [page?.publicUrl, page?.slug, page?.status]);
 
+  // Atualiza o registro da página com `publicUrl`/`slug` assim que o job termina.
+  useEffect(() => {
+    if (job?.status !== 'completed' || !page?.id) return;
+    const pid = job.result?.pageId;
+    if (pid && pid !== page.id) return;
+    if (!job.result?.publicUrl) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/pages/${page.id}`, {
+          headers: authHeader(),
+        });
+        if (!res.ok || cancelled) return;
+        setPage((await res.json()) as PageRecord);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [job?.status, job?.result?.publicUrl, job?.result?.pageId, page?.id]);
+
   useEffect(() => {
     const sourceHtml = page?.latestVersion?.html;
     if (!sourceHtml) {
@@ -908,20 +931,51 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
         const text = await res.text();
         throw new Error(`HTTP ${res.status}: ${text.slice(0, 180)}`);
       }
-      const data = (await res.json()) as { jobId: string };
+      const data = (await res.json()) as {
+        jobId: string;
+        status?: string;
+        publicUrl?: string;
+        error?: string;
+      };
+      if (data.status === 'completed') {
+        if (data.publicUrl) {
+          setPublishState({
+            status: 'done',
+            jobId: data.jobId,
+            publicUrl: data.publicUrl,
+          });
+          return;
+        }
+        /* resposta antiga só com jobId — segue para o poll */
+      }
+      if (data.status === 'failed' || data.status === 'blocked') {
+        setPublishState({
+          status: 'error',
+          error: data.error ?? 'Falha ao publicar',
+        });
+        return;
+      }
       setPublishState({ status: 'processing', jobId: data.jobId });
       const pollStart = Date.now();
       const poll = async (): Promise<void> => {
-        if (Date.now() - pollStart > 60000) {
+        if (Date.now() - pollStart > 120000) {
           setPublishState({
             status: 'error',
-            error: 'Publicação demorou demais. Tente novamente.',
+            error:
+              'Publicação demorou demais. Verifique se o backend está no ar e tente de novo.',
           });
           return;
         }
         const jobRes = await fetch(`${API_BASE}/jobs/${data.jobId}`, {
           headers: authHeader(),
         });
+        if (!jobRes.ok) {
+          setPublishState({
+            status: 'error',
+            error: `Não foi possível consultar o job (${jobRes.status}).`,
+          });
+          return;
+        }
         const job = (await jobRes.json()) as {
           status?: string;
           result?: { publicUrl?: string };
@@ -935,7 +989,7 @@ function JobLoadingScreen({ jobId, pageId, mode, onBack }: Props) {
           });
           return;
         }
-        if (job.status === 'failed') {
+        if (job.status === 'failed' || job.status === 'blocked') {
           setPublishState({
             status: 'error',
             error: job.error ?? 'Falha desconhecida',

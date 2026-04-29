@@ -25,6 +25,7 @@ interface JobRecord {
   type: Mode | 'publish';
   status: JobStatus;
   updatedAt: string;
+  result?: { pageId?: string; publicUrl?: string; slug?: string };
 }
 
 interface JobsStreamProps {
@@ -62,6 +63,10 @@ function JobsStream({ jobs, onOpen }: JobsStreamProps) {
           const done = job.status === 'completed';
           const failed = job.status === 'failed' || job.status === 'blocked';
           const openMode = job.type === 'publish' ? 'clone' : (job.type as Mode);
+          const publicUrl =
+            typeof job.result?.publicUrl === 'string'
+              ? job.result.publicUrl
+              : undefined;
           return (
             <li key={job.id} className={`landing-job status-${job.status}`}>
               <div className="landing-job-info">
@@ -81,15 +86,27 @@ function JobsStream({ jobs, onOpen }: JobsStreamProps) {
                 </div>
               </div>
               <span className={`landing-job-status ${job.status}`}>{statusLabel(job.status)}</span>
-              <button
-                type="button"
-                className="landing-job-open"
-                onClick={() => onOpen(job.id, openMode)}
-                disabled={failed}
-                title={done ? 'Abrir editor' : 'Abrir progresso'}
-              >
-                {done ? 'Abrir editor' : failed ? '—' : 'Acompanhar'}
-              </button>
+              <div className="landing-job-actions">
+                {done && publicUrl ? (
+                  <a
+                    href={publicUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="landing-job-site"
+                  >
+                    Ver site
+                  </a>
+                ) : null}
+                <button
+                  type="button"
+                  className="landing-job-open"
+                  onClick={() => onOpen(job.id, openMode)}
+                  disabled={failed}
+                  title={done ? 'Abrir editor' : 'Abrir progresso'}
+                >
+                  {done ? 'Abrir editor' : failed ? '—' : 'Acompanhar'}
+                </button>
+              </div>
             </li>
           );
         })}
