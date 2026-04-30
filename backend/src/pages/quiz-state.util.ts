@@ -521,9 +521,33 @@ export const QUIZ_STATE_BROWSER_JS = `
     } catch (_) {}
   })();
 
-  const interactiveEls = deepQueryAll(
-    'button, [role="button"], a[href], [role="radio"], [role="option"], [role="tab"], [role="checkbox"], [role="switch"], input[type="submit"], input[type="button"], input[type="radio"], input[type="checkbox"], label, summary, [data-testid], [data-cy]'
+  let interactiveEls = deepQueryAll(
+    'button, [role="button"], a[href], [role="radio"], [role="option"], [role="tab"], [role="checkbox"], [role="switch"], input[type="submit"], input[type="button"], input[type="radio"], input[type="checkbox"], label, summary, [data-testid], [data-cy], [onclick], [tabindex]'
   );
+  // Fallback for quizzes that render answer cards as plain div/li/span
+  // with JS handlers and no semantic role/button markup.
+  if (interactiveEls.length === 0) {
+    const pointerLike = deepQueryAll('div, li, span').filter((el) => {
+      if (!isVisible(el)) return false;
+      const txt = normalize(el.textContent || '');
+      if (!txt || txt.length > 80) return false;
+      if (BOILERPLATE_RE.test(txt)) return false;
+      if (el.closest('header, nav, footer')) return false;
+      const cs = getComputedStyle(el);
+      if (cs.cursor === 'pointer') return true;
+      // Common utility-style classes seen in quiz builders.
+      const cls = ((el.getAttribute('class') || '') + '').toLowerCase();
+      return (
+        cls.indexOf('option') >= 0 ||
+        cls.indexOf('answer') >= 0 ||
+        cls.indexOf('choice') >= 0 ||
+        cls.indexOf('radio') >= 0
+      );
+    });
+    if (pointerLike.length > 0) {
+      interactiveEls = pointerLike;
+    }
+  }
 
   const actions = [];
   const seen = new Set();
